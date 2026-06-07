@@ -1,0 +1,25 @@
+name: Validate PR source branch
+
+# Garante que Pull Requests para a branch main só possam vir da branch dev.
+# Este job é marcado como required status check na proteção da main, então um PR
+# de qualquer outra branch de origem fica bloqueado para merge.
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  validate-source:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verificar branch de origem
+        run: |
+          if [ "${{ github.head_ref }}" != "dev" ]; then
+            echo "ERRO: PRs para 'main' só são aceitos a partir da branch 'dev'."
+            echo "Branch de origem detectada: ${{ github.head_ref }}"
+            exit 1
+          fi
+          echo "Branch de origem válida: dev"

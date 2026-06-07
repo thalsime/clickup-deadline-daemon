@@ -1,0 +1,11 @@
+#!/bin/sh
+# Bloqueia push direto para a main. A main só deve avançar via merge de PR no GitHub.
+while read local_ref local_sha remote_ref remote_sha; do
+  branch=$(echo "$remote_ref" | sed 's|refs/heads/||')
+  if [ "$branch" = "main" ]; then
+    echo "Erro: push direto para 'main' bloqueado pelo hook local."
+    echo "A main só avança via Pull Request (a partir da dev) na interface do GitHub."
+    exit 1
+  fi
+done
+exit 0
