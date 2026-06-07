@@ -428,3 +428,51 @@ webhook-deadline-daemon/
 -- nginx.conf.example
 -- README.md
 ```
+
+---
+
+## Fluxo de contribuição
+
+Branches:
+
+- `main` -- branch de release protegida. Nunca recebe commit ou push direto. Só avança
+  via squash-merge de Pull Requests vindos exclusivamente da `dev`, mergeados na
+  interface do GitHub.
+- `dev` -- branch de integração (default). Recebe código via Pull Request a partir de
+  branches de trabalho (`feature/...`, `fix/...`). Protegida contra push direto, force-push
+  e deleção; exige CI verde.
+
+Fluxo de trabalho:
+
+1. Crie uma branch a partir da `dev`:
+   `git checkout dev && git pull && git checkout -b feature/minha-mudanca`
+2. Faça commits (assinados) e abra um PR para a `dev`. O CI precisa passar.
+3. Quando a `dev` estiver pronta para release, abra um PR `dev` -> `main` no GitHub.
+   O check `validate-source` garante que só a `dev` pode ser origem, e o CI precisa
+   passar. Faça o squash-merge pelo botão do GitHub.
+
+### Setup local obrigatório (uma vez por clone)
+
+Ativa os hooks que bloqueiam commit/push direto na `main`:
+
+```bash
+git config core.hooksPath .githooks
+```
+
+Os hooks (`.githooks/pre-commit` e `.githooks/pre-push`) recusam commits e pushes diretos
+na `main` localmente. A proteção real está nos rulesets do GitHub; os hooks são uma rede
+de segurança local.
+
+### Commits assinados
+
+A `main` exige commits verificados (`required_signatures`). Configure a assinatura SSH no
+clone, reaproveitando sua chave de autenticação:
+
+```bash
+git config gpg.format ssh
+git config user.signingkey ~/.ssh/sua_chave.pub
+git config commit.gpgsign true
+```
+
+Registre a mesma chave pública como **Signing Key** em GitHub Settings -> SSH and GPG keys
+(é um tipo distinto da Authentication Key; a mesma chave pode ser registrada nos dois tipos).
