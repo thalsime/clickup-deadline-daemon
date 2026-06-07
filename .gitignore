@@ -66,3 +66,6 @@ tags
 *.db-shm
 *.log
 audit.jsonl
+
+# Symlink do claude-link (workspace sincronizado via nuvem)
+tmp/
