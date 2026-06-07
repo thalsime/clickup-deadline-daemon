@@ -1,19 +1,68 @@
-# Variaveis de ambiente (contem segredos -- NUNCA versionar)
-.env
+# Configurações e diretórios de agentes de IA locais (Antigravity/Claude/Gemini)
+.antigravitycli/
+.claude/
+.gemini/
+CLAUDE.md
+GEMINI.md
 
-# Cache Python e ambientes virtuais
+# Variáveis de ambiente e segredos (NUNCA versionar)
+.env
+.env.local
+.env.*.local
+
+# Ambientes virtuais e empacotamento Python
+venv/
+.venv/
+env/
+ENV/
+build/
+dist/
+*.egg-info/
+*.egg
+
+# Caches de execução e compilação Python
 __pycache__/
 *.py[cod]
 *.pyo
 *.pyd
-venv/
-.venv/
+*.so
+
+# Caches de testes, tipagem e linters
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
 
-# Auditoria SQLite (contem PII: IDs e emails de usuarios -- NUNCA versionar)
+# Editor JetBrains / PyCharm
+.idea/
+*.iws
+*.iml
+*.ipr
+cmake-build-*/
+
+# Editor Visual Studio Code
+.vscode/
+.history/
+*.vsix
+
+# Editor Vim e arquivos temporários
+[._]*.s[a-v][a-z]
+[._]*.sw[a-p]
+[._]s[a-rt-v][a-z]
+[._]ss[a-gi-z]
+Session.vim
+Sessionx.vim
+.netrwhist
+*~
+tags
+[._]*.un~
+
+# Auditoria SQLite e logs locais (Contém PII -- NUNCA versionar)
 *.db
 *.db-wal
 *.db-shm
+*.log
 audit.jsonl
