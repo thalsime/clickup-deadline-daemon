@@ -1,0 +1,9 @@
+#!/bin/sh
+# Bloqueia commits diretos na branch main. A main só deve receber código via
+# squash-merge de PRs vindos da dev, feitos pela interface do GitHub.
+branch=$(git rev-parse --abbrev-ref HEAD)
+if [ "$branch" = "main" ]; then
+  echo "Erro: commits diretos na branch 'main' não são permitidos."
+  echo "Use uma branch de trabalho (ex.: feature/...) e abra PR para a dev."
+  exit 1
+fi
