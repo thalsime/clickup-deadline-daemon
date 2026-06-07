@@ -1,0 +1,19 @@
+# Variaveis de ambiente (contem segredos -- NUNCA versionar)
+.env
+
+# Cache Python e ambientes virtuais
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+venv/
+.venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Auditoria SQLite (contem PII: IDs e emails de usuarios -- NUNCA versionar)
+*.db
+*.db-wal
+*.db-shm
+audit.jsonl

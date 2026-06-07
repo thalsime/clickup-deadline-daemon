@@ -1,0 +1,6 @@
+# Dependencias de desenvolvimento e testes
+# Instalar com: venvs/python/bin/pip install -r requirements-dev.txt
+# (nao incluir no requirements.txt de producao)
+
+pytest>=8.3
+pytest-asyncio>=0.24
