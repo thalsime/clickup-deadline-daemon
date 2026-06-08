@@ -51,6 +51,7 @@ def register(workspace_id: str, endpoint_url: str, events: list[str], secret: st
         f"{CLICKUP_API_BASE}/team/{workspace_id}/webhook",
         headers=HEADERS,
         json=payload,
+        timeout=10.0,
     )
     resp.raise_for_status()
     data    = resp.json()
@@ -75,6 +76,7 @@ def list_webhooks(workspace_id: str):
     resp = httpx.get(
         f"{CLICKUP_API_BASE}/team/{workspace_id}/webhook",
         headers=HEADERS,
+        timeout=10.0,
     )
     resp.raise_for_status()
     data     = resp.json()
@@ -95,6 +97,7 @@ def delete_webhook(webhook_id: str):
     resp = httpx.delete(
         f"{CLICKUP_API_BASE}/webhook/{webhook_id}",
         headers=HEADERS,
+        timeout=10.0,
     )
     resp.raise_for_status()
     print(f"Webhook {webhook_id} removido.")
@@ -113,6 +116,7 @@ def update_webhook(webhook_id: str, endpoint_url: str | None, events: list[str])
         f"{CLICKUP_API_BASE}/webhook/{webhook_id}",
         headers=HEADERS,
         json=payload,
+        timeout=10.0,
     )
     resp.raise_for_status()
     data = resp.json()

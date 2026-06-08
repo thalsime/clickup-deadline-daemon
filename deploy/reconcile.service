@@ -1,0 +1,41 @@
+# reconcile.service
+# Unidade oneshot do reconciliador idempotente do ClickUp deadline daemon.
+# Ativada pelo reconcile.timer a cada 10 minutos.
+#
+# Deploy:
+#   sudo cp deploy/reconcile.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   # (o timer ativa automaticamente; nao e necessario enable/start desta unidade)
+
+[Unit]
+Description=ClickUp deadline reconciler (oneshot)
+After=network-online.target
+Wants=network-online.target
+# Garantir que o daemon principal ja subiu antes da primeira execucao.
+After=clickup-deadline-daemon.service
+
+[Service]
+Type=oneshot
+User=www-data
+WorkingDirectory=/opt/clickup-deadline-daemon
+
+# Carregar variaveis de ambiente do mesmo .env do daemon principal.
+EnvironmentFile=/opt/clickup-deadline-daemon/.env
+
+# Variaveis especificas do reconciliador.
+# RECONCILE_LIST_IDS: IDs das listas a varrer (csv). Ajustar para o workspace.
+# Para dry-run manual: systemctl start reconcile.service com RECONCILE_DRY_RUN=1.
+Environment=RECONCILE_DRY_RUN=0
+
+ExecStart=/opt/clickup-deadline-daemon/venv/bin/python /opt/clickup-deadline-daemon/reconcile.py
+
+# Registrar saida no journal junto com o daemon principal.
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=clickup-reconciler
+
+# Timeout generoso para listas com muitas tasks (paginacao).
+TimeoutStartSec=120
+
+[Install]
+WantedBy=multi-user.target
