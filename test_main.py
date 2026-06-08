@@ -228,6 +228,16 @@ def test_nao_trigger_assignee_remocao_sem_field_after_nulo():
     assert should_trigger_on_assignee(event) is False
 
 
+def test_nao_trigger_assignee_remocao_sem_field_after_dict_vazio():
+    # Caso real: ClickUp pode enviar after={} em remoções (sem 'id')
+    event = {
+        "event":   "taskAssigneeUpdated",
+        "task_id": "task-001",
+        "history_items": [{"before": {"id": 111111, "username": "Bob"}, "after": {}}],
+    }
+    assert should_trigger_on_assignee(event) is False
+
+
 def test_nao_trigger_assignee_sem_history_items():
     event = {"event": "taskAssigneeUpdated", "task_id": "task-001"}
     assert should_trigger_on_assignee(event) is False

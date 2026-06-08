@@ -258,15 +258,23 @@ def should_trigger_on_assignee(event: dict) -> bool:
     O ClickUp emite 'taskAssigneeUpdated' tanto para adição quanto para remoção.
     A direção é sinalizada pelo campo 'field' do history_item: "assignee_add" para
     adição e "assignee_rem" para remoção. Fallback quando 'field' estiver ausente:
-    'after' preenchido indica adição; None indica remoção.
+    só trata como adição se 'after' for um dict com 'id' preenchido (um usuário real).
+    'after: {}' ou 'after: null' indicam remoção e são ignorados.
     """
     if event.get("event") != "taskAssigneeUpdated":
         return False
     first_item = (event.get("history_items") or [{}])[0]
     field = first_item.get("field", "")
+    log.debug(
+        "taskAssigneeUpdated: field=%r after=%r",
+        field,
+        first_item.get("after"),
+    )
     if field:
         return "add" in field.lower()
-    return first_item.get("after") is not None
+    # Fallback: 'after' deve ser um dict com 'id' para ser adição real.
+    after = first_item.get("after")
+    return isinstance(after, dict) and bool(after.get("id"))
 
 # ---------------------------------------------------------------------------
 # Lógica de due_date
@@ -361,6 +369,11 @@ async def handle_status_in_progress(
             "Task %s: já tem %d responsável(is) -- skip atribuição automática.",
             task_id,
             len(assignees),
+        )
+    else:
+        log.warning(
+            "Task %s: actor_id ausente no evento -- responsável não atribuído.",
+            task_id,
         )
 
     result["trigger"] = "status_changed"
