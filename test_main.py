@@ -260,6 +260,48 @@ def test_compute_due_date_ms_cresce_com_estimate():
 
 
 # ===========================================================================
+# apply_due_date: guarda de due_date="0" (D2)
+# ===========================================================================
+
+@pytest.mark.asyncio
+async def test_apply_due_date_zero_string_nao_e_prazo_definido(monkeypatch):
+    """due_date='0' deve ser tratado como ausente; prazo deve ser calculado e aplicado."""
+    task = make_task(14_400_000, assignees=[], due_date="0")
+    chamadas: list = []
+
+    async def mock_set_due_date(client, task_id, due_date_ms):
+        chamadas.append(due_date_ms)
+
+    monkeypatch.setattr(main, "set_due_date", mock_set_due_date)
+
+    async with httpx.AsyncClient() as client:
+        result = await main.apply_due_date(client, "task-001", task)
+
+    assert result.get("action") == "due_date_set", (
+        "due_date='0' foi incorretamente interpretado como prazo ja definido"
+    )
+    assert len(chamadas) == 1
+
+
+@pytest.mark.asyncio
+async def test_apply_due_date_zero_int_nao_e_prazo_definido(monkeypatch):
+    """due_date=0 (inteiro) deve ser tratado como ausente; prazo deve ser aplicado."""
+    task = make_task(14_400_000, assignees=[], due_date=0)
+    chamadas: list = []
+
+    async def mock_set_due_date(client, task_id, due_date_ms):
+        chamadas.append(due_date_ms)
+
+    monkeypatch.setattr(main, "set_due_date", mock_set_due_date)
+
+    async with httpx.AsyncClient() as client:
+        result = await main.apply_due_date(client, "task-001", task)
+
+    assert result.get("action") == "due_date_set"
+    assert len(chamadas) == 1
+
+
+# ===========================================================================
 # Predicado "pendente" (case-insensitive via PENDING_STATUSES)
 # ===========================================================================
 
