@@ -278,8 +278,11 @@ async def apply_due_date(
 
     due_ms = compute_due_date_ms(task)
     if due_ms is None:
-        log.info(
-            "Task %s ('%s'): time_estimate não definido -- ignorando.", task_id, task_name
+        raw_estimate = task.get("time_estimate")
+        log.warning(
+            "Task %s ('%s'): time_estimate ausente ou inválido (valor_bruto=%r)"
+            " -- prazo não será definido.",
+            task_id, task_name, raw_estimate,
         )
         return {"task_id": task_id, "action": "skipped", "reason": "time_estimate not set"}
 
