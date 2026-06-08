@@ -252,8 +252,21 @@ def should_trigger_on_status(event: dict) -> bool:
 
 
 def should_trigger_on_assignee(event: dict) -> bool:
-    """Verifica se o evento é uma atribuição de responsável."""
-    return event.get("event") == "taskAssigneeUpdated"
+    """
+    Verifica se o evento é uma ADIÇÃO de responsável (ignora remoções).
+
+    O ClickUp emite 'taskAssigneeUpdated' tanto para adição quanto para remoção.
+    A direção é sinalizada pelo campo 'field' do history_item: "assignee_add" para
+    adição e "assignee_rem" para remoção. Fallback quando 'field' estiver ausente:
+    'after' preenchido indica adição; None indica remoção.
+    """
+    if event.get("event") != "taskAssigneeUpdated":
+        return False
+    first_item = (event.get("history_items") or [{}])[0]
+    field = first_item.get("field", "")
+    if field:
+        return "add" in field.lower()
+    return first_item.get("after") is not None
 
 # ---------------------------------------------------------------------------
 # Lógica de due_date
