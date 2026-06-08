@@ -179,9 +179,58 @@ def test_nao_trigger_evento_diferente():
 # should_trigger_on_assignee
 # ===========================================================================
 
-def test_trigger_assignee():
-    event = {"event": "taskAssigneeUpdated", "task_id": "task-001"}
+def make_assignee_remove_event(actor_id: int = 111111, removed_id: int = 111111) -> dict:
+    return {
+        "event":   "taskAssigneeUpdated",
+        "task_id": "task-001",
+        "history_items": [{
+            "id":    "item-003",
+            "date":  "1748000000002",
+            "field": "assignee_rem",
+            "user":  {
+                "id":       actor_id,
+                "username": "Alice",
+                "email":    "alice@ex.com",
+            },
+            "before": {
+                "id":       removed_id,
+                "username": "Bob",
+                "email":    "bob@ex.com",
+            },
+            "after": None,
+        }],
+    }
+
+
+def test_trigger_assignee_adicao_com_field():
+    assert should_trigger_on_assignee(make_assignee_event()) is True
+
+
+def test_trigger_assignee_adicao_sem_field_mas_com_after():
+    event = {
+        "event":   "taskAssigneeUpdated",
+        "task_id": "task-001",
+        "history_items": [{"after": {"id": 111111, "username": "Bob"}}],
+    }
     assert should_trigger_on_assignee(event) is True
+
+
+def test_nao_trigger_assignee_remocao_com_field():
+    assert should_trigger_on_assignee(make_assignee_remove_event()) is False
+
+
+def test_nao_trigger_assignee_remocao_sem_field_after_nulo():
+    event = {
+        "event":   "taskAssigneeUpdated",
+        "task_id": "task-001",
+        "history_items": [{"before": {"id": 111111, "username": "Bob"}, "after": None}],
+    }
+    assert should_trigger_on_assignee(event) is False
+
+
+def test_nao_trigger_assignee_sem_history_items():
+    event = {"event": "taskAssigneeUpdated", "task_id": "task-001"}
+    assert should_trigger_on_assignee(event) is False
 
 
 def test_nao_trigger_assignee_outro_evento():
