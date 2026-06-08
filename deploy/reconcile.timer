@@ -1,0 +1,27 @@
+# reconcile.timer
+# Dispara o reconcile.service a cada 10 minutos.
+# Persistent=true garante execucao ao reiniciar a VPS mesmo que o horario
+# programado tenha passado durante o downtime.
+#
+# Deploy:
+#   sudo cp deploy/reconcile.timer /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now reconcile.timer
+#
+# Verificar proximas execucoes:
+#   systemctl list-timers reconcile.timer
+
+[Unit]
+Description=Timer do reconciliador de deadlines do ClickUp
+Requires=reconcile.service
+
+[Timer]
+# Primeira execucao logo apos o boot (30s de folga para o daemon principal subir).
+OnBootSec=30s
+# Execucoes subsequentes a cada 10 minutos a partir da ultima conclusao.
+OnUnitActiveSec=10min
+# Executar a proxima vez que possivel se o horario passou durante downtime.
+Persistent=true
+
+[Install]
+WantedBy=timers.target

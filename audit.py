@@ -13,12 +13,18 @@ import asyncio
 import json
 import logging
 import sqlite3
+import threading
 from datetime import datetime, timezone
 
 log = logging.getLogger("deadline-daemon.audit")
 
 # Conexão global -- inicializada em init_audit() no startup do daemon.
 _conn: sqlite3.Connection | None = None
+
+# Lock de escrita: SQLite com check_same_thread=False permite acesso concorrente,
+# mas executemany() sem barreira causa "database is locked" sob rajadas de eventos
+# simultâneos. O Lock garante que apenas uma thread grava por vez.
+_lock = threading.Lock()
 
 _CREATE_TABLE = """
 CREATE TABLE IF NOT EXISTS audit_log (
@@ -82,11 +88,15 @@ def init_audit(backend: str, path: str) -> None:
 
 
 def _write_rows(rows: list[tuple]) -> None:
-    """Escrita síncrona -- chamada via asyncio.to_thread para não bloquear o event loop."""
+    """
+    Escrita síncrona -- chamada via asyncio.to_thread para não bloquear o event loop.
+    O _lock serializa gravações concorrentes e previne "database is locked" sob rajadas.
+    """
     if _conn is None:
         raise RuntimeError("init_audit() não foi chamado antes de _write_rows()")
-    with _conn:
-        _conn.executemany(_INSERT, rows)
+    with _lock:
+        with _conn:
+            _conn.executemany(_INSERT, rows)
 
 
 async def audit_record(
@@ -128,9 +138,12 @@ async def audit_record(
         event_date      = str(item.get("date") or "")
         field           = str(item.get("field") or "")
 
-        user        = item.get("user") or {}
-        raw_uid     = user.get("id")
-        actor_id    = int(raw_uid)  if raw_uid  is not None else None
+        user     = item.get("user") or {}
+        raw_uid  = user.get("id")
+        try:
+            actor_id = int(raw_uid) if raw_uid is not None else None
+        except (ValueError, TypeError):
+            actor_id = None
         actor_name  = str(user.get("username") or "")
         actor_email = str(user.get("email")    or "")
 
@@ -181,3 +194,31 @@ async def audit_record(
         ))
 
     await asyncio.to_thread(_write_rows, rows)
+
+
+def _update_action(history_item_ids: list[str], action: str) -> None:
+    """Escrita síncrona -- atualiza daemon_action nas linhas já inseridas."""
+    if _conn is None:
+        return
+    with _lock:
+        with _conn:
+            _conn.executemany(
+                "UPDATE audit_log SET daemon_action = ? WHERE history_item_id = ?",
+                [(action, hid) for hid in history_item_ids],
+            )
+
+
+async def audit_set_daemon_action(history_item_ids: list[str], action: str) -> None:
+    """
+    Atualiza a coluna daemon_action nas linhas já gravadas pelo audit_record.
+
+    Deve ser chamado após o roteamento (quando a ação do daemon é conhecida).
+    Usa o mesmo _lock de _write_rows para evitar colisão de transações.
+
+    Args:
+        history_item_ids: IDs dos history_items do evento roteado.
+        action:           rótulo da ação executada (ex.: "due_date_set", "skipped").
+    """
+    if not history_item_ids:
+        return
+    await asyncio.to_thread(_update_action, history_item_ids, action)

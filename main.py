@@ -1,6 +1,6 @@
 """
-clickup-deadline-daemon  v2.0
-==============================
+clickup-deadline-daemon  v1.1.0
+===============================
 Webhook receiver que:
   1. Calcula due_date quando uma task muda para "em progresso" ou recebe um assignee.
   2. Ao mover para o status de trigger sem responsável, atribui quem fez a mudança.
@@ -115,6 +115,11 @@ async def get_task(client: httpx.AsyncClient, task_id: str) -> dict:
         f"{CLICKUP_API_BASE}/task/{task_id}",
         params={"include_subtasks": "false"},
     )
+    if not resp.is_success:
+        log.error(
+            "ClickUp GET /task/%s -> %d: %s",
+            task_id, resp.status_code, resp.text[:500],
+        )
     resp.raise_for_status()
     return resp.json()
 
@@ -125,6 +130,11 @@ async def set_due_date(client: httpx.AsyncClient, task_id: str, due_date_ms: int
         f"{CLICKUP_API_BASE}/task/{task_id}",
         json={"due_date": due_date_ms},
     )
+    if not resp.is_success:
+        log.error(
+            "ClickUp PUT /task/%s (due_date=%d) -> %d: %s",
+            task_id, due_date_ms, resp.status_code, resp.text[:500],
+        )
     resp.raise_for_status()
 
 
@@ -134,6 +144,11 @@ async def add_assignee(client: httpx.AsyncClient, task_id: str, user_id: int) ->
         f"{CLICKUP_API_BASE}/task/{task_id}",
         json={"assignees": {"add": [user_id], "rem": []}},
     )
+    if not resp.is_success:
+        log.error(
+            "ClickUp PUT /task/%s (assignee add) -> %d: %s",
+            task_id, resp.status_code, resp.text[:500],
+        )
     resp.raise_for_status()
 
 
@@ -143,6 +158,11 @@ async def set_status(client: httpx.AsyncClient, task_id: str, status: str) -> No
         f"{CLICKUP_API_BASE}/task/{task_id}",
         json={"status": status},
     )
+    if not resp.is_success:
+        log.error(
+            "ClickUp PUT /task/%s (status=%r) -> %d: %s",
+            task_id, status, resp.status_code, resp.text[:500],
+        )
     resp.raise_for_status()
 
 # ---------------------------------------------------------------------------
@@ -171,13 +191,29 @@ def extract_estimate_days(task: dict) -> int | None:
 def compute_due_date_ms(task: dict) -> int | None:
     """
     Calcula o timestamp ms da due_date a partir de time_estimate.
+
+    A base de cálculo é max(agora, start_date), garantindo due_date >= start_date.
+    O ClickUp rejeita com 400 um PUT de due_date anterior ao start_date existente
+    (confirmado em producao: task 86e1qtczy retornou 400 por este motivo).
+
     Retorna None se time_estimate não estiver definido ou for inválido.
     """
     estimate_days = extract_estimate_days(task)
     if estimate_days is None:
         return None
     now_utc = datetime.now(timezone.utc)
-    due_dt  = now_utc + timedelta(days=estimate_days)
+    # Respeitar start_date: due_date nunca pode ser anterior ao início da task.
+    raw_start = task.get("start_date")
+    try:
+        start_dt = (
+            datetime.fromtimestamp(int(raw_start) / 1000, tz=timezone.utc)
+            if raw_start
+            else None
+        )
+    except (ValueError, TypeError):
+        start_dt = None
+    base   = max(now_utc, start_dt) if start_dt else now_utc
+    due_dt = base + timedelta(days=estimate_days)
     return int(due_dt.timestamp() * 1000)
 
 
@@ -234,7 +270,9 @@ async def apply_due_date(
     """
     task_name = task.get("name", "")
 
-    if task.get("due_date"):
+    raw_due = task.get("due_date")
+    due_date_set = raw_due is not None and raw_due != 0 and raw_due != "0"
+    if due_date_set:
         log.info("Task %s ('%s'): já tem due_date -- ignorando.", task_id, task_name)
         return {"task_id": task_id, "action": "skipped", "reason": "due_date already set"}
 
@@ -245,9 +283,9 @@ async def apply_due_date(
         )
         return {"task_id": task_id, "action": "skipped", "reason": "time_estimate not set"}
 
+    estimate_days = extract_estimate_days(task)   # mesmo valor já usado em compute_due_date_ms
     await set_due_date(client, task_id, due_ms)
-    due_dt        = datetime.fromtimestamp(due_ms / 1000, tz=timezone.utc)
-    estimate_days = extract_estimate_days(task)
+    due_dt = datetime.fromtimestamp(due_ms / 1000, tz=timezone.utc)
     log.info(
         "Task %s ('%s'): due_date definida para %s (+%d dias de esforço).",
         task_id,
@@ -274,21 +312,34 @@ async def handle_status_in_progress(
 
     Regra 1: calcula due_date (se não existir). Se a task não tiver nenhum
     responsável, atribui quem moveu o status.
+
+    Cada ação (due_date, assignee) é isolada: falha em uma não aborta as demais.
+    O webhook sempre devolve 200 (5xx desabilita o webhook no ClickUp), portanto
+    erros devem ser registrados e o handler deve continuar.
     """
-    task   = await get_task(client, task_id)
-    result = await apply_due_date(client, task_id, task)
+    task = await get_task(client, task_id)
+
+    try:
+        result = await apply_due_date(client, task_id, task)
+    except Exception as exc:
+        log.error("Task %s: falha ao aplicar due_date: %s", task_id, exc)
+        result = {"task_id": task_id, "action": "error", "due_date_error": str(exc)}
 
     actor_id  = get_actor_id(event)
     assignees = task.get("assignees") or []
 
     if actor_id is not None and not assignees:
-        await add_assignee(client, task_id, actor_id)
-        log.info(
-            "Task %s: responsável atribuído automaticamente (actor_id=%d).",
-            task_id,
-            actor_id,
-        )
-        result["assignee_added"] = actor_id
+        try:
+            await add_assignee(client, task_id, actor_id)
+            log.info(
+                "Task %s: responsável atribuído automaticamente (actor_id=%d).",
+                task_id,
+                actor_id,
+            )
+            result["assignee_added"] = actor_id
+        except Exception as exc:
+            log.error("Task %s: falha ao atribuir responsável: %s", task_id, exc)
+            result["assignee_error"] = str(exc)
     elif assignees:
         log.info(
             "Task %s: já tem %d responsável(is) -- skip atribuição automática.",
@@ -308,21 +359,32 @@ async def handle_assignee_added(
 
     Regra 2: calcula due_date (se não existir). Se a task estiver em um status
     "pendente", promove para TARGET_STATUS ("em progresso").
+
+    Cada ação (due_date, set_status) é isolada: falha em uma não aborta as demais.
     A cascata gerada pelo set_status será bloqueada pelo anti-loop (actor = daemon).
     """
-    task   = await get_task(client, task_id)
-    result = await apply_due_date(client, task_id, task)
+    task = await get_task(client, task_id)
+
+    try:
+        result = await apply_due_date(client, task_id, task)
+    except Exception as exc:
+        log.error("Task %s: falha ao aplicar due_date: %s", task_id, exc)
+        result = {"task_id": task_id, "action": "error", "due_date_error": str(exc)}
 
     current_status = task.get("status", {}).get("status", "").lower().strip()
     if current_status in PENDING_STATUSES:
-        await set_status(client, task_id, TARGET_STATUS)
-        log.info(
-            "Task %s: status promovido de '%s' para '%s'.",
-            task_id,
-            current_status,
-            TARGET_STATUS,
-        )
-        result["status_set"] = TARGET_STATUS
+        try:
+            await set_status(client, task_id, TARGET_STATUS)
+            log.info(
+                "Task %s: status promovido de '%s' para '%s'.",
+                task_id,
+                current_status,
+                TARGET_STATUS,
+            )
+            result["status_set"] = TARGET_STATUS
+        except Exception as exc:
+            log.error("Task %s: falha ao promover status: %s", task_id, exc)
+            result["status_error"] = str(exc)
     else:
         log.info(
             "Task %s: status '%s' não é pendente -- skip promoção.",
@@ -360,22 +422,27 @@ async def lifespan(app: FastAPI):
 # App
 # ---------------------------------------------------------------------------
 
-app = FastAPI(title="ClickUp Deadline Daemon", version="1.0.0", lifespan=lifespan)
+app = FastAPI(title="ClickUp Deadline Daemon", version="1.1.0", lifespan=lifespan)
 
 # ---------------------------------------------------------------------------
 # Helpers -- assinatura
 # ---------------------------------------------------------------------------
 
 def verify_signature(body: bytes, signature: str) -> bool:
-    """Verifica a assinatura HMAC-SHA256 do webhook (se WEBHOOK_SECRET definido)."""
+    """
+    Verifica a assinatura HMAC-SHA256 do webhook (se WEBHOOK_SECRET definido).
+    Tolera o prefixo opcional "sha256=" que algumas implementações acrescentam.
+    """
     if not WEBHOOK_SECRET:
         return True
+    # Normalizar: remover prefixo "sha256=" se presente.
+    sig = signature.removeprefix("sha256=")
     expected = hmac.new(
         WEBHOOK_SECRET.encode(),
         body,
         hashlib.sha256,
     ).hexdigest()
-    return hmac.compare_digest(expected, signature)
+    return hmac.compare_digest(expected, sig)
 
 # ---------------------------------------------------------------------------
 # Endpoints
@@ -419,7 +486,7 @@ async def webhook(
 
     # 2. Anti-loop: ignorar ações do próprio daemon no roteamento (auditoria já feita)
     if is_self_action(event):
-        log.debug("self-action ignorada: event=%s task=%s", event_type, task_id)
+        log.info("self-action ignorada: event=%s task=%s", event_type, task_id)
         return JSONResponse({"status": "ignored", "reason": "self-action"})
 
     # 3. Postura conservadora: sem TOKEN_OWNER_ID resolvido, só auditou -- não age
@@ -449,5 +516,18 @@ async def webhook(
     except Exception as exc:
         log.error("Erro ao processar event=%s task=%s: %s", event_type, task_id, exc)
         return JSONResponse({"status": "error", "reason": str(exc)})
+
+    # 5. Registrar daemon_action nas linhas de auditoria já gravadas.
+    try:
+        hids = [
+            str(item["id"])
+            for item in (event.get("history_items") or [])
+            if item.get("id")
+        ]
+        if hids:
+            action_label = result.get("action") or "handled"
+            await _audit.audit_set_daemon_action(hids, action_label)
+    except Exception as exc:
+        log.error("Erro ao atualizar daemon_action: %s", exc)
 
     return JSONResponse(result)
