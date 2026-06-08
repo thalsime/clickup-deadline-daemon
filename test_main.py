@@ -6,6 +6,7 @@ Rodar com:
   pytest test_main.py -v
 """
 
+import asyncio
 import os
 import sqlite3
 import sys
@@ -38,14 +39,24 @@ from main import (
 
 @pytest.fixture()
 def fresh_audit_db(tmp_path, monkeypatch):
-    """Inicializa um audit.db isolado para cada teste de auditoria."""
+    """
+    Inicializa um audit.db isolado para cada teste de auditoria.
+
+    Guarda a conexão e o lock originais antes de init_audit e os restaura no
+    teardown -- evita que a conexão fechada com o tmp_path vaze para outros testes.
+    """
+    prev_conn = _audit._conn
+    prev_lock = _audit._lock
+
     db_path = str(tmp_path / "test_audit.db")
     _audit.init_audit("sqlite", db_path)
     yield db_path
-    # Fechar conexão ao fim do teste para liberar o arquivo temporário
-    if _audit._conn:
+
+    # Fechar a conexão do teste e restaurar o estado anterior.
+    if _audit._conn and _audit._conn is not prev_conn:
         _audit._conn.close()
-        monkeypatch.setattr(_audit, "_conn", None)
+    monkeypatch.setattr(_audit, "_conn", prev_conn)
+    monkeypatch.setattr(_audit, "_lock", prev_lock)
 
 
 # ===========================================================================
@@ -472,3 +483,215 @@ async def test_audit_nao_marca_is_self_action_para_humano(fresh_audit_db):
 
     assert row is not None
     assert row[0] == 0, "is_self_action deveria ser 0 para ação humana"
+
+
+# ===========================================================================
+# A1: compute_due_date_ms respeita start_date
+# ===========================================================================
+
+def test_compute_due_date_ms_sem_start_date():
+    """Sem start_date, a base é agora (comportamento original)."""
+    task = make_task(14_400_000)   # 1 dia
+    result = main.compute_due_date_ms(task)
+    assert result is not None and result > 0
+
+
+def test_compute_due_date_ms_start_date_futuro_e_base():
+    """
+    Com start_date no futuro, due_date deve ser >= start_date + estimativa,
+    não agora + estimativa. Garante que o PUT não retorna 400 por due < start.
+    """
+    import time
+    agora_ms  = int(time.time() * 1000)
+    # start_date daqui a 10 dias
+    start_ms  = agora_ms + 10 * 86_400_000
+    task      = {
+        "id":            "task-start",
+        "name":          "Teste start_date",
+        "time_estimate": 14_400_000,   # 1 dia
+        "assignees":     [],
+        "due_date":      None,
+        "status":        {"status": "pendente"},
+        "start_date":    str(start_ms),
+    }
+    due_ms = main.compute_due_date_ms(task)
+    assert due_ms is not None
+    # due_date deve ser pelo menos start_date (base >= start_date)
+    assert due_ms >= start_ms, (
+        f"due_date ({due_ms}) deve ser >= start_date ({start_ms})"
+    )
+
+
+def test_compute_due_date_ms_start_date_passado_nao_recua():
+    """Com start_date no passado, a base continua sendo agora (max)."""
+    import time
+    agora_ms  = int(time.time() * 1000)
+    start_ms  = agora_ms - 5 * 86_400_000   # 5 dias atrás
+    task      = {
+        "id":            "task-start-past",
+        "name":          "Teste start passado",
+        "time_estimate": 14_400_000,
+        "assignees":     [],
+        "due_date":      None,
+        "status":        {"status": "pendente"},
+        "start_date":    str(start_ms),
+    }
+    due_ms = main.compute_due_date_ms(task)
+    assert due_ms is not None
+    assert due_ms >= agora_ms, "Due no passado não faz sentido"
+
+
+def test_compute_due_date_ms_start_date_invalido_nao_quebra():
+    """start_date inválido (string não-numérica) não deve lançar exceção."""
+    task = {
+        "id":            "task-bad-start",
+        "name":          "Teste",
+        "time_estimate": 14_400_000,
+        "assignees":     [],
+        "due_date":      None,
+        "status":        {"status": "pendente"},
+        "start_date":    "nao-e-um-timestamp",
+    }
+    # Deve funcionar como se start_date não existisse
+    result = main.compute_due_date_ms(task)
+    assert result is not None and result > 0
+
+
+# ===========================================================================
+# A2: isolamento de falha em handlers (due_date falha -> assignee/status ainda ocorre)
+# ===========================================================================
+
+@pytest.mark.asyncio
+async def test_regra1_assignee_ocorre_mesmo_com_falha_no_due_date(monkeypatch):
+    """
+    Regra 1: se set_due_date lançar (ex.: 400 do ClickUp por start_date),
+    add_assignee ainda deve ser executado -- as ações são independentes.
+    """
+    task  = make_task(28_800_000, assignees=[], due_date=None)
+    event = make_status_event("em progresso", actor_id=111111)
+
+    calls: dict = {"add_assignee": []}
+
+    async def mock_get_task(client, task_id):
+        return task
+
+    async def mock_set_due_date(client, task_id, due_date_ms):
+        raise Exception("400 Bad Request -- due_date < start_date (simulado)")
+
+    async def mock_add_assignee(client, task_id, user_id):
+        calls["add_assignee"].append(user_id)
+
+    monkeypatch.setattr(main, "get_task",     mock_get_task)
+    monkeypatch.setattr(main, "set_due_date", mock_set_due_date)
+    monkeypatch.setattr(main, "add_assignee", mock_add_assignee)
+    monkeypatch.setattr(main, "TOKEN_OWNER_ID", 222222)
+
+    async with httpx.AsyncClient() as client:
+        result = await main.handle_status_in_progress(client, "task-001", event)
+
+    # Apesar do erro no due_date, o assignee deve ter sido atribuído.
+    assert calls["add_assignee"] == [111111], "add_assignee deve ser chamado mesmo com falha em due_date"
+    assert "due_date_error" in result, "Erro de due_date deve ser registrado no resultado"
+    assert result.get("assignee_added") == 111111
+
+
+@pytest.mark.asyncio
+async def test_regra2_status_promovido_mesmo_com_falha_no_due_date(monkeypatch):
+    """
+    Regra 2: se set_due_date lançar, set_status ainda deve ser executado.
+    """
+    task  = make_task(28_800_000, assignees=[], due_date=None, status="pendente")
+    event = make_assignee_event(actor_id=111111, assigned_id=111111)
+
+    calls: dict = {"set_status": []}
+
+    async def mock_get_task(client, task_id):
+        return task
+
+    async def mock_set_due_date(client, task_id, due_date_ms):
+        raise Exception("400 Bad Request -- simulado")
+
+    async def mock_set_status(client, task_id, status):
+        calls["set_status"].append(status)
+
+    monkeypatch.setattr(main, "get_task",     mock_get_task)
+    monkeypatch.setattr(main, "set_due_date", mock_set_due_date)
+    monkeypatch.setattr(main, "set_status",   mock_set_status)
+    monkeypatch.setattr(main, "TOKEN_OWNER_ID", 222222)
+
+    async with httpx.AsyncClient() as client:
+        result = await main.handle_assignee_added(client, "task-001", event)
+
+    assert calls["set_status"] == [main.TARGET_STATUS], "set_status deve ser chamado mesmo com falha em due_date"
+    assert "due_date_error" in result
+    assert result.get("status_set") == main.TARGET_STATUS
+
+
+# ===========================================================================
+# C1: lock do SQLite sob gravações concorrentes
+# ===========================================================================
+
+@pytest.mark.asyncio
+async def test_audit_lock_sob_concorrencia(fresh_audit_db):
+    """
+    Sob rajada de N gravações simultâneas, todas as linhas devem ser persistidas.
+    Antes do _lock, ~50% das linhas se perdiam (confirmado em producao).
+    """
+    N = 20
+    events = [
+        {
+            "event":   "taskStatusUpdated",
+            "task_id": f"task-lock-{i}",
+            "history_items": [{
+                "id":    f"item-lock-{i:04d}",
+                "date":  "1748000000000",
+                "field": "status",
+                "user":  {"id": 111111, "username": "Alice", "email": "a@ex.com"},
+                "after": {"status": "em progresso"},
+            }],
+        }
+        for i in range(N)
+    ]
+
+    # Disparar todas as gravações concorrentemente
+    await asyncio.gather(*[_audit.audit_record(e, token_owner_id=None) for e in events])
+
+    conn  = sqlite3.connect(fresh_audit_db)
+    count = conn.execute("SELECT COUNT(*) FROM audit_log").fetchone()[0]
+    conn.close()
+
+    assert count == N, (
+        f"Esperado {N} linhas sob concorrência; gravado {count}. "
+        f"Possível falha no _lock de escrita."
+    )
+
+
+# ===========================================================================
+# C2: audit_set_daemon_action popula a coluna daemon_action
+# ===========================================================================
+
+@pytest.mark.asyncio
+async def test_audit_set_daemon_action(fresh_audit_db):
+    """daemon_action deve ser atualizado após o roteamento."""
+    event = {
+        "event":   "taskStatusUpdated",
+        "task_id": "task-daction",
+        "history_items": [{
+            "id":    "item-daction-001",
+            "date":  "1748000000010",
+            "field": "status",
+            "user":  {"id": 111111, "username": "Alice", "email": "a@ex.com"},
+            "after": {"status": "em progresso"},
+        }],
+    }
+    await _audit.audit_record(event, token_owner_id=None)
+    await _audit.audit_set_daemon_action(["item-daction-001"], "due_date_set")
+
+    conn = sqlite3.connect(fresh_audit_db)
+    row  = conn.execute(
+        "SELECT daemon_action FROM audit_log WHERE history_item_id = 'item-daction-001'"
+    ).fetchone()
+    conn.close()
+
+    assert row is not None
+    assert row[0] == "due_date_set", f"daemon_action esperado 'due_date_set', obtido {row[0]!r}"
