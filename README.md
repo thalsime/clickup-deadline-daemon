@@ -1,11 +1,15 @@
-# webhook-deadline-daemon
+# clickup-deadline-daemon
+
+> **v1.1.3** -- [CHANGELOG](CHANGELOG.md)
 
 Daemon de automação do ClickUp que executa três regras quando tasks mudam de estado:
 
 **Regra 1 -- Status "em progresso" sem responsável:** quando uma task muda para "em
 progresso" (ou outro status em `TRIGGER_STATUSES`) e não tem nenhum assignee, o daemon
 atribui automaticamente quem executou a mudança de status. Em seguida calcula e define
-o `due_date` a partir do `time_estimate`.
+o `due_date` a partir do `time_estimate`. Se o ator do evento não estiver disponível no
+payload (ex.: automações nativas do ClickUp), o daemon loga um WARNING e calcula o
+`due_date` sem atribuir responsável.
 
 **Regra 2 -- Assignee em task pendente:** quando alguém é atribuído a uma task cujo
 status está em `PENDING_STATUSES` (ex.: "pendente"), o daemon promove o status para
@@ -20,6 +24,8 @@ Regras comuns a todas:
 - Age somente se o campo nativo `time_estimate` estiver preenchido na task.
 - Converte o esforço em dias úteis pela base 4h/dia (`MS_PER_DAY = 14400000 ms`),
   arredondando para cima. Exemplo: `time_estimate = 43200000` ms (3 dias) -> prazo = hoje + 3.
+- O prazo base é `max(agora, start_date) + dias_de_estimativa`. Isso evita o HTTP 400
+  que o ClickUp retorna quando `due_date` calculado ficaria antes do `start_date` da task.
 - Não sobrescreve `due_date` já definida manualmente.
 - Compatível com o plano **Free** do ClickUp (usa webhooks nativos, sem custom fields).
 - O banco de auditoria (`audit.db`) contém PII -- **nunca versionar**.
@@ -111,8 +117,42 @@ sudo systemctl status clickup-deadline-daemon
 sudo journalctl -u clickup-deadline-daemon -f
 ```
 
-No startup, o log deve mostrar a linha `TOKEN_OWNER_ID resolvido: <id>`. Se aparecer
-`TOKEN_OWNER_ID nao resolvido` o daemon funciona em modo conservador (audita, não escreve).
+No startup, o log deve mostrar a linha `Token owner resolvido: id=<id>`. Se aparecer
+`Não foi possível resolver o token owner`, o daemon funciona em modo conservador (audita, não escreve).
+
+---
+
+## 3.1. Configurar o reconciliador (systemd timer)
+
+O reconciliador varre periodicamente as listas configuradas e aplica as regras de
+`due_date` e promoção de status em tasks que o webhook possa ter perdido (reinício
+do daemon, 502 transitório, evento anterior ao deploy).
+
+```bash
+sudo cp deploy/reconcile.service /etc/systemd/system/
+sudo cp deploy/reconcile.timer   /etc/systemd/system/
+
+# Definir RECONCILE_LIST_IDS no unit (IDs das listas separados por virgula)
+sudo nano /etc/systemd/system/reconcile.service
+
+sudo systemctl daemon-reload
+sudo systemctl enable --now reconcile.timer
+
+# Verificar proxima execucao
+systemctl list-timers reconcile.timer
+
+# Dry-run manual para validar antes de ativar
+RECONCILE_DRY_RUN=1 sudo systemctl start reconcile.service
+sudo journalctl -u clickup-reconciler -f
+```
+
+O timer executa a cada **10 minutos** com `Persistent=true` -- garante execução ao
+reiniciar o VPS caso o horário programado tenha passado durante o downtime.
+
+**Nota:** o reconciliador não repete a lógica de "atribuir quem moveu o status"
+(Regra 1 parte 2), pois essa depende do ator do evento original, disponível apenas
+no payload do webhook. As demais invariantes (calcular `due_date` e promover status)
+são aplicadas idempotentemente.
 
 ---
 
@@ -182,8 +222,9 @@ venv/bin/python register_webhook.py delete --webhook-id <id>
 
 **AVISO:** o ClickUp **ignora** o parâmetro `--secret` passado na criação e gera um
 secret próprio. O secret real está na **resposta** do comando `register` -- copiar
-imediatamente para o `.env`. O wildcard `--events "*"` **não é aceito** pelo ClickUp --
-usar lista explícita de eventos (ver `.env.example` para a lista completa dos 13 eventos).
+imediatamente para o `.env`. O wildcard `--events "*"` é aceito pelo ClickUp e é o
+padrão do script: cobre todos os eventos do workspace, incluindo tipos adicionados
+futuramente. Para limitar a eventos específicos, passar a lista em `--events`.
 
 ---
 
@@ -233,8 +274,9 @@ export CLICKUP_API_TOKEN=pk_dummy_test_token
 pytest test_main.py -v
 ```
 
-Os testes cobrem: predicados puros (`get_actor_id`, `is_self_action`, `compute_due_date_ms`),
-as três regras de automação, o anti-loop e o dedup de auditoria. Total: 33 testes.
+Os testes cobrem: predicados puros (`get_actor_id`, `is_self_action`, `compute_due_date_ms`,
+`due_date_is_set`, `is_assignee_add`), as três regras de automação, o anti-loop, o dedup de
+auditoria e a discriminação add/rem no `taskAssigneeUpdated`. Total: **48 testes**.
 Requer `pytest>=8.3` e `pytest-asyncio>=0.24` (instalados via `requirements-dev.txt`).
 
 ---
@@ -249,8 +291,10 @@ Requer `pytest>=8.3` e `pytest-asyncio>=0.24` (instalados via `requirements-dev.
 | `TARGET_STATUS` | Não | `em progresso` | Nome exato do status para o qual a Regra 2 promove tasks "pendentes". Deve bater com o status configurado no Space. |
 | `PENDING_STATUSES` | Não | `pendente` | Status considerados "pendente" para a Regra 2, separados por vírgula, case-insensitive. |
 | `MS_PER_DAY` | Não | `14400000` | Milissegundos por dia útil (default: 4h/dia). |
-| `AUDIT_BACKEND` | Não | `sqlite` | Backend de auditoria (somente `sqlite` disponível na v2). |
+| `AUDIT_BACKEND` | Não | `sqlite` | Backend de auditoria (somente `sqlite` suportado atualmente). |
 | `AUDIT_PATH` | Não | `/opt/clickup-deadline-daemon/audit.db` | Caminho do SQLite de auditoria. Deve ser gravável pelo usuário que roda o serviço. PII -- **nunca versionar**. |
+| `RECONCILE_LIST_IDS` | Sim (reconcile.py) | -- | IDs das listas do ClickUp a varrer, separados por vírgula. Obrigatório para o reconciliador. Exemplo: `<LIST_ID_1>,<LIST_ID_2>`. |
+| `RECONCILE_DRY_RUN` | Não | `0` | Se `1` ou `true`, o reconciliador loga sem escrever nenhuma alteração. Útil para validar antes de ativar em produção. |
 
 ---
 
@@ -265,7 +309,7 @@ CREATE TABLE audit_log (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     history_item_id TEXT UNIQUE,       -- dedup contra reentregas do ClickUp
     received_at     TEXT,              -- ISO UTC (quando o webhook chegou)
-    event_date      INTEGER,           -- epoch ms do item (quando a mudança ocorreu)
+    event_date      TEXT,              -- epoch ms do item como string (quando a mudança ocorreu)
     event_type      TEXT,              -- ex.: taskStatusUpdated
     task_id         TEXT,
     team_id         TEXT,
@@ -389,6 +433,18 @@ Dois campos de usuário distintos:
 
 Quando alguém se auto-atribui, os dois objetos referenciam a mesma pessoa.
 
+**AVISO: evento bidirecional.** O ClickUp emite `taskAssigneeUpdated` tanto para
+**adição** quanto para **remoção** de responsável. A direção é indicada pelo campo
+`field` do `history_item`:
+
+- `field: "assignee_add"` -- responsável foi **adicionado** (daemon deve reagir)
+- `field: "assignee_rem"` -- responsável foi **removido** (daemon ignora)
+
+Fallback quando `field` estiver ausente: o daemon verifica se `after` é um dict com
+`id` preenchido (`after.get("id")` truthy). Se `after: {}` (dict vazio) ou
+`after: null`, trata como remoção e ignora. A lógica está em `is_assignee_add()`
+em `main.py`.
+
 ---
 
 ## 10. Nota: `time_estimate` na API ClickUp usa milissegundos
@@ -416,16 +472,22 @@ passar o valor em ms diretamente (confirmado em 2026-06-07).
 ## Estrutura do projeto
 
 ```
-webhook-deadline-daemon/
--- main.py                           # FastAPI app -- logica principal (v1.0.0)
+clickup-deadline-daemon/
+-- main.py                           # FastAPI app -- logica principal (v1.1.3)
+-- rules.py                          # Predicados e calculo de due_date (compartilhado)
 -- audit.py                          # Modulo de auditoria SQLite
--- test_main.py                      # Testes unitarios (33 testes)
+-- reconcile.py                      # Reconciliador idempotente (varre listas a cada 10 min)
+-- test_main.py                      # Testes unitarios (48 testes)
 -- register_webhook.py               # Script para registrar/listar/atualizar/remover webhooks
 -- requirements.txt                  # Dependencias de producao
 -- requirements-dev.txt              # Dependencias de desenvolvimento (pytest, pytest-asyncio)
 -- .env.example
--- clickup-deadline-daemon.service   # systemd unit file
+-- CHANGELOG.md                      # Historico de versoes (v1.0.0 a v1.1.3)
+-- clickup-deadline-daemon.service   # systemd unit -- daemon principal (FastAPI, porta 8765)
 -- nginx.conf.example
+-- deploy/
+    -- reconcile.service             # systemd unit -- reconciliador (oneshot)
+    -- reconcile.timer               # systemd timer -- dispara a cada 10 minutos
 -- README.md
 ```
 
