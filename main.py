@@ -1,5 +1,5 @@
 """
-clickup-deadline-daemon  v1.1.0
+clickup-deadline-daemon  v1.1.3
 ===============================
 Webhook receiver que:
   1. Calcula due_date quando uma task muda para "em progresso" ou recebe um assignee.
@@ -40,7 +40,7 @@ CLICKUP_API_TOKEN = os.environ["CLICKUP_API_TOKEN"]
 WEBHOOK_SECRET = os.environ.get("CLICKUP_WEBHOOK_SECRET", "")  # recomendado
 
 # Milissegundos por dia útil (base 4h/dia). Override via env se a base mudar.
-# Ver docs/clickup/webhook-deadline-daemon/README.md seção 9 para referência de valores.
+# Ver README.md seção 10 para tabela de referência de valores.
 MS_PER_DAY = int(os.environ.get("MS_PER_DAY", 14_400_000))
 
 # Status que disparam as regras de due_date e atribuição (lowercase, case-insensitive).
@@ -451,7 +451,7 @@ async def lifespan(app: FastAPI):
 # App
 # ---------------------------------------------------------------------------
 
-app = FastAPI(title="ClickUp Deadline Daemon", version="1.1.0", lifespan=lifespan)
+app = FastAPI(title="ClickUp Deadline Daemon", version="1.1.3", lifespan=lifespan)
 
 # ---------------------------------------------------------------------------
 # Helpers -- assinatura
