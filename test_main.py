@@ -361,6 +361,116 @@ async def test_apply_due_date_zero_int_nao_e_prazo_definido(monkeypatch):
 
 
 # ===========================================================================
+# apply_due_date: fallback de estimativa (v1.2.0)
+# ===========================================================================
+
+@pytest.mark.asyncio
+async def test_apply_due_date_fallback_sem_estimate(monkeypatch):
+    """Sem time_estimate + fallback habilitado: grava prazo e comenta (due_date_set_fallback)."""
+    task = make_task(None, assignees=[], due_date=None)
+    dues: list = []
+    comments: list = []
+
+    async def mock_set_due_date(client, task_id, due_date_ms):
+        dues.append(due_date_ms)
+
+    async def mock_post_comment(client, task_id, text):
+        comments.append(text)
+
+    monkeypatch.setattr(main, "FALLBACK_ESTIMATE_DAYS", 2)
+    monkeypatch.setattr(main, "set_due_date", mock_set_due_date)
+    monkeypatch.setattr(main, "post_comment", mock_post_comment)
+
+    async with httpx.AsyncClient() as client:
+        result = await main.apply_due_date(client, "task-001", task)
+
+    assert result.get("action") == "due_date_set_fallback"
+    assert result.get("days_added") == 2
+    assert len(dues) == 1
+    assert len(comments) == 1 and "2 dias" in comments[0]
+
+
+@pytest.mark.asyncio
+async def test_apply_due_date_fallback_desativado(monkeypatch):
+    """Sem time_estimate e FALLBACK_ESTIMATE_DAYS=0: volta ao skip, sem prazo nem comentario."""
+    task = make_task(None, assignees=[], due_date=None)
+    dues: list = []
+    comments: list = []
+
+    async def mock_set_due_date(client, task_id, due_date_ms):
+        dues.append(due_date_ms)
+
+    async def mock_post_comment(client, task_id, text):
+        comments.append(text)
+
+    monkeypatch.setattr(main, "FALLBACK_ESTIMATE_DAYS", 0)
+    monkeypatch.setattr(main, "set_due_date", mock_set_due_date)
+    monkeypatch.setattr(main, "post_comment", mock_post_comment)
+
+    async with httpx.AsyncClient() as client:
+        result = await main.apply_due_date(client, "task-001", task)
+
+    assert result.get("action") == "skipped"
+    assert result.get("reason") == "time_estimate not set"
+    assert dues == [] and comments == []
+
+
+@pytest.mark.asyncio
+async def test_apply_due_date_com_estimate_nao_comenta(monkeypatch):
+    """Com time_estimate: caminho normal (due_date_set), sem comentario de fallback."""
+    task = make_task(14_400_000, assignees=[], due_date=None)
+    comments: list = []
+
+    async def mock_set_due_date(client, task_id, due_date_ms):
+        pass
+
+    async def mock_post_comment(client, task_id, text):
+        comments.append(text)
+
+    monkeypatch.setattr(main, "FALLBACK_ESTIMATE_DAYS", 2)
+    monkeypatch.setattr(main, "set_due_date", mock_set_due_date)
+    monkeypatch.setattr(main, "post_comment", mock_post_comment)
+
+    async with httpx.AsyncClient() as client:
+        result = await main.apply_due_date(client, "task-001", task)
+
+    assert result.get("action") == "due_date_set"
+    assert comments == []
+
+
+@pytest.mark.asyncio
+async def test_apply_due_date_ja_definido_nao_comenta(monkeypatch):
+    """due_date ja definido: skip, sem set_due_date nem comentario (mesmo sem time_estimate)."""
+    task = make_task(None, assignees=[], due_date=1782223260000)
+    dues: list = []
+    comments: list = []
+
+    async def mock_set_due_date(client, task_id, due_date_ms):
+        dues.append(due_date_ms)
+
+    async def mock_post_comment(client, task_id, text):
+        comments.append(text)
+
+    monkeypatch.setattr(main, "FALLBACK_ESTIMATE_DAYS", 2)
+    monkeypatch.setattr(main, "set_due_date", mock_set_due_date)
+    monkeypatch.setattr(main, "post_comment", mock_post_comment)
+
+    async with httpx.AsyncClient() as client:
+        result = await main.apply_due_date(client, "task-001", task)
+
+    assert result.get("action") == "skipped"
+    assert result.get("reason") == "due_date already set"
+    assert dues == [] and comments == []
+
+
+def test_compute_due_date_ms_fallback_quando_sem_estimate():
+    """compute_due_date_ms com fallback_days retorna prazo mesmo sem time_estimate."""
+    assert main.compute_due_date_ms(make_task(None)) is None
+    via_fallback = main.compute_due_date_ms(make_task(None), fallback_days=2)
+    assert isinstance(via_fallback, int) and via_fallback > 0
+
+
+# ===========================================================================
 # Predicado "pendente" (case-insensitive via PENDING_STATUSES)
 # ===========================================================================
 

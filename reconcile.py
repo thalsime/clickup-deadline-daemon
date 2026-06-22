@@ -41,7 +41,9 @@ from rules import (
     compute_due_date_ms,
     due_date_is_set,
     extract_estimate_days,
+    fallback_comment_text,
     get_list_tasks,
+    post_comment,
     set_due_date,
     set_status,
 )
@@ -70,6 +72,10 @@ PENDING_STATUSES = {
     for s in os.environ.get("PENDING_STATUSES", "pendente").split(",")
     if s.strip()
 }
+
+# Fallback de estimativa (mesma semantica do daemon): sem time_estimate, usa este numero
+# de dias uteis como estimativa padrao, grava a due_date e comenta. 0 desativa.
+FALLBACK_ESTIMATE_DAYS = int(os.environ.get("FALLBACK_ESTIMATE_DAYS", 2))
 
 _list_ids_raw = os.environ.get("RECONCILE_LIST_IDS", "")
 LIST_IDS: list[str] = [lid.strip() for lid in _list_ids_raw.split(",") if lid.strip()]
@@ -142,6 +148,41 @@ async def reconcile_task(client: httpx.AsyncClient, task: dict) -> dict:
                     except Exception as exc:
                         log.error(
                             "Task %s ('%s'): falha ao set_due_date: %s",
+                            task_id, task_name, exc,
+                        )
+                        actions.append(f"due_date_error:{exc}")
+        elif FALLBACK_ESTIMATE_DAYS and FALLBACK_ESTIMATE_DAYS > 0:
+            # Sem time_estimate: aplicar o fallback (prazo padrao + comentario de revisao).
+            due_ms = compute_due_date_ms(
+                task, MS_PER_DAY, fallback_days=FALLBACK_ESTIMATE_DAYS
+            )
+            if due_ms is not None:
+                if DRY_RUN:
+                    log.info(
+                        "[DRY-RUN] Task %s ('%s'): fallback set_due_date +%d dias + comentario.",
+                        task_id, task_name, FALLBACK_ESTIMATE_DAYS,
+                    )
+                else:
+                    try:
+                        await set_due_date(client, task_id, due_ms)
+                        actions.append("due_date_set_fallback")
+                        log.warning(
+                            "Task %s ('%s'): sem time_estimate -- prazo pelo fallback de "
+                            "%d dias; comentando para revisao.",
+                            task_id, task_name, FALLBACK_ESTIMATE_DAYS,
+                        )
+                        try:
+                            await post_comment(
+                                client, task_id, fallback_comment_text(FALLBACK_ESTIMATE_DAYS)
+                            )
+                        except Exception as exc:
+                            log.error(
+                                "Task %s ('%s'): falha ao comentar fallback: %s",
+                                task_id, task_name, exc,
+                            )
+                    except Exception as exc:
+                        log.error(
+                            "Task %s ('%s'): falha ao set_due_date (fallback): %s",
                             task_id, task_name, exc,
                         )
                         actions.append(f"due_date_error:{exc}")
