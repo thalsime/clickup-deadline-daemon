@@ -21,12 +21,17 @@ contém: quem executou, quando, qual campo mudou, valor antes e depois.
 
 Regras comuns a todas:
 
-- Age somente se o campo nativo `time_estimate` estiver preenchido na task.
-- Converte o esforço em dias úteis pela base 4h/dia (`MS_PER_DAY = 14400000 ms`),
-  arredondando para cima. Exemplo: `time_estimate = 43200000` ms (3 dias) -> prazo = hoje + 3.
+- Com `time_estimate` preenchido: converte o esforço em dias úteis pela base 4h/dia
+  (`MS_PER_DAY = 14400000 ms`), arredondando para cima. Exemplo: `time_estimate = 43200000`
+  ms (3 dias) -> prazo = hoje + 3.
+- Sem `time_estimate`: aplica um **fallback** de `FALLBACK_ESTIMATE_DAYS` dias úteis
+  (default 2), grava a `due_date` e **comenta na task** avisando que a estimativa estava
+  ausente, que o prazo pode não ser real e que se recomenda revisão. `FALLBACK_ESTIMATE_DAYS=0`
+  desativa o fallback (volta a apenas pular quando falta a estimativa).
 - O prazo base é `max(agora, start_date) + dias_de_estimativa`. Isso evita o HTTP 400
   que o ClickUp retorna quando `due_date` calculado ficaria antes do `start_date` da task.
-- Não sobrescreve `due_date` já definida manualmente.
+- Não sobrescreve `due_date` já definida manualmente (logo, o comentário do fallback é
+  postado uma única vez: na passagem seguinte a `due_date` já existe e a task é pulada).
 - Compatível com o plano **Free** do ClickUp (usa webhooks nativos, sem custom fields).
 - O banco de auditoria (`audit.db`) contém PII -- **nunca versionar**.
 
@@ -291,6 +296,7 @@ Requer `pytest>=8.3` e `pytest-asyncio>=0.24` (instalados via `requirements-dev.
 | `TARGET_STATUS` | Não | `em progresso` | Nome exato do status para o qual a Regra 2 promove tasks "pendentes". Deve bater com o status configurado no Space. |
 | `PENDING_STATUSES` | Não | `pendente` | Status considerados "pendente" para a Regra 2, separados por vírgula, case-insensitive. |
 | `MS_PER_DAY` | Não | `14400000` | Milissegundos por dia útil (default: 4h/dia). |
+| `FALLBACK_ESTIMATE_DAYS` | Não | `2` | Dias úteis usados como estimativa padrão quando a task entra no gatilho sem `time_estimate`: grava a `due_date` e comenta pedindo revisão. `0` desativa o fallback. |
 | `AUDIT_BACKEND` | Não | `sqlite` | Backend de auditoria (somente `sqlite` suportado atualmente). |
 | `AUDIT_PATH` | Não | `/opt/clickup-deadline-daemon/audit.db` | Caminho do SQLite de auditoria. Deve ser gravável pelo usuário que roda o serviço. PII -- **nunca versionar**. |
 | `RECONCILE_LIST_IDS` | Sim (reconcile.py) | -- | IDs das listas do ClickUp a varrer, separados por vírgula. Obrigatório para o reconciliador. Exemplo: `<LIST_ID_1>,<LIST_ID_2>`. |
