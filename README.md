@@ -1,6 +1,6 @@
 # clickup-deadline-daemon
 
-> **v1.1.3** -- [CHANGELOG](CHANGELOG.md)
+> **v1.2.0** -- [CHANGELOG](CHANGELOG.md)
 
 Daemon de automação do ClickUp que executa três regras quando tasks mudam de estado:
 
@@ -479,16 +479,16 @@ passar o valor em ms diretamente (confirmado em 2026-06-07).
 
 ```
 clickup-deadline-daemon/
--- main.py                           # FastAPI app -- logica principal (v1.1.3)
+-- main.py                           # FastAPI app -- logica principal (v1.2.0)
 -- rules.py                          # Predicados e calculo de due_date (compartilhado)
 -- audit.py                          # Modulo de auditoria SQLite
 -- reconcile.py                      # Reconciliador idempotente (varre listas a cada 10 min)
--- test_main.py                      # Testes unitarios (48 testes)
+-- test_main.py                      # Testes unitarios (53 testes)
 -- register_webhook.py               # Script para registrar/listar/atualizar/remover webhooks
 -- requirements.txt                  # Dependencias de producao
 -- requirements-dev.txt              # Dependencias de desenvolvimento (pytest, pytest-asyncio)
 -- .env.example
--- CHANGELOG.md                      # Historico de versoes (v1.0.0 a v1.1.3)
+-- CHANGELOG.md                      # Historico de versoes (v1.0.0 a v1.2.0)
 -- clickup-deadline-daemon.service   # systemd unit -- daemon principal (FastAPI, porta 8765)
 -- nginx.conf.example
 -- deploy/
