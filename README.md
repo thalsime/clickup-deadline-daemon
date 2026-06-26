@@ -1,6 +1,6 @@
 # clickup-deadline-daemon
 
-> **v1.1.3** -- [CHANGELOG](CHANGELOG.md)
+> **v1.2.0** -- [CHANGELOG](CHANGELOG.md)
 
 Daemon de automação do ClickUp que executa três regras quando tasks mudam de estado:
 
@@ -21,12 +21,17 @@ contém: quem executou, quando, qual campo mudou, valor antes e depois.
 
 Regras comuns a todas:
 
-- Age somente se o campo nativo `time_estimate` estiver preenchido na task.
-- Converte o esforço em dias úteis pela base 4h/dia (`MS_PER_DAY = 14400000 ms`),
-  arredondando para cima. Exemplo: `time_estimate = 43200000` ms (3 dias) -> prazo = hoje + 3.
+- Com `time_estimate` preenchido: converte o esforço em dias úteis pela base 4h/dia
+  (`MS_PER_DAY = 14400000 ms`), arredondando para cima. Exemplo: `time_estimate = 43200000`
+  ms (3 dias) -> prazo = hoje + 3.
+- Sem `time_estimate`: aplica um **fallback** de `FALLBACK_ESTIMATE_DAYS` dias úteis
+  (default 2), grava a `due_date` e **comenta na task** avisando que a estimativa estava
+  ausente, que o prazo pode não ser real e que se recomenda revisão. `FALLBACK_ESTIMATE_DAYS=0`
+  desativa o fallback (volta a apenas pular quando falta a estimativa).
 - O prazo base é `max(agora, start_date) + dias_de_estimativa`. Isso evita o HTTP 400
   que o ClickUp retorna quando `due_date` calculado ficaria antes do `start_date` da task.
-- Não sobrescreve `due_date` já definida manualmente.
+- Não sobrescreve `due_date` já definida manualmente (logo, o comentário do fallback é
+  postado uma única vez: na passagem seguinte a `due_date` já existe e a task é pulada).
 - Compatível com o plano **Free** do ClickUp (usa webhooks nativos, sem custom fields).
 - O banco de auditoria (`audit.db`) contém PII -- **nunca versionar**.
 
@@ -291,6 +296,7 @@ Requer `pytest>=8.3` e `pytest-asyncio>=0.24` (instalados via `requirements-dev.
 | `TARGET_STATUS` | Não | `em progresso` | Nome exato do status para o qual a Regra 2 promove tasks "pendentes". Deve bater com o status configurado no Space. |
 | `PENDING_STATUSES` | Não | `pendente` | Status considerados "pendente" para a Regra 2, separados por vírgula, case-insensitive. |
 | `MS_PER_DAY` | Não | `14400000` | Milissegundos por dia útil (default: 4h/dia). |
+| `FALLBACK_ESTIMATE_DAYS` | Não | `2` | Dias úteis usados como estimativa padrão quando a task entra no gatilho sem `time_estimate`: grava a `due_date` e comenta pedindo revisão. `0` desativa o fallback. |
 | `AUDIT_BACKEND` | Não | `sqlite` | Backend de auditoria (somente `sqlite` suportado atualmente). |
 | `AUDIT_PATH` | Não | `/opt/clickup-deadline-daemon/audit.db` | Caminho do SQLite de auditoria. Deve ser gravável pelo usuário que roda o serviço. PII -- **nunca versionar**. |
 | `RECONCILE_LIST_IDS` | Sim (reconcile.py) | -- | IDs das listas do ClickUp a varrer, separados por vírgula. Obrigatório para o reconciliador. Exemplo: `<LIST_ID_1>,<LIST_ID_2>`. |
@@ -473,16 +479,16 @@ passar o valor em ms diretamente (confirmado em 2026-06-07).
 
 ```
 clickup-deadline-daemon/
--- main.py                           # FastAPI app -- logica principal (v1.1.3)
+-- main.py                           # FastAPI app -- logica principal (v1.2.0)
 -- rules.py                          # Predicados e calculo de due_date (compartilhado)
 -- audit.py                          # Modulo de auditoria SQLite
 -- reconcile.py                      # Reconciliador idempotente (varre listas a cada 10 min)
--- test_main.py                      # Testes unitarios (48 testes)
+-- test_main.py                      # Testes unitarios (53 testes)
 -- register_webhook.py               # Script para registrar/listar/atualizar/remover webhooks
 -- requirements.txt                  # Dependencias de producao
 -- requirements-dev.txt              # Dependencias de desenvolvimento (pytest, pytest-asyncio)
 -- .env.example
--- CHANGELOG.md                      # Historico de versoes (v1.0.0 a v1.1.3)
+-- CHANGELOG.md                      # Historico de versoes (v1.0.0 a v1.2.0)
 -- clickup-deadline-daemon.service   # systemd unit -- daemon principal (FastAPI, porta 8765)
 -- nginx.conf.example
 -- deploy/

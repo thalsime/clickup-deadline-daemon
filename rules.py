@@ -110,6 +110,30 @@ async def set_status(client: httpx.AsyncClient, task_id: str, status: str) -> No
     resp.raise_for_status()
 
 
+async def post_comment(client: httpx.AsyncClient, task_id: str, text: str) -> None:
+    """Posta um comentario na task (POST /task/{id}/comment), sem notificar todos."""
+    resp = await client.post(
+        f"{CLICKUP_API_BASE}/task/{task_id}/comment",
+        json={"comment_text": text, "notify_all": False},
+    )
+    if not resp.is_success:
+        log.error(
+            "ClickUp POST /task/%s/comment -> %d: %s",
+            task_id, resp.status_code, resp.text[:500],
+        )
+    resp.raise_for_status()
+
+
+def fallback_comment_text(days: int) -> str:
+    """Texto do comentario postado quando o prazo e definido pelo fallback (sem time_estimate)."""
+    return (
+        f"Prazo definido automaticamente com estimativa padrão de {days} dias úteis "
+        "porque esta tarefa estava sem estimativa de esforço (time_estimate). "
+        "Este prazo pode não refletir o esforço real - recomenda-se revisar a "
+        "estimativa de esforço e ajustar o prazo, se necessário."
+    )
+
+
 # ---------------------------------------------------------------------------
 # Helpers -- calculo de datas
 # ---------------------------------------------------------------------------
@@ -133,7 +157,9 @@ def extract_estimate_days(task: dict, ms_per_day: int) -> int | None:
     return math.ceil(estimate_ms / ms_per_day)
 
 
-def compute_due_date_ms(task: dict, ms_per_day: int) -> int | None:
+def compute_due_date_ms(
+    task: dict, ms_per_day: int, fallback_days: int | None = None
+) -> int | None:
     """
     Calcula o timestamp ms da due_date a partir de time_estimate.
 
@@ -141,11 +167,14 @@ def compute_due_date_ms(task: dict, ms_per_day: int) -> int | None:
     O ClickUp rejeita com 400 um PUT de due_date anterior ao start_date existente
     (confirmado em producao: task 86e1qtczy retornou 400 por este motivo).
 
-    Retorna None se time_estimate nao estiver definido ou for invalido.
+    Sem time_estimate: retorna None, a menos que fallback_days (> 0) seja informado --
+    nesse caso usa fallback_days como estimativa padrao (ver FALLBACK_ESTIMATE_DAYS).
     """
     estimate_days = extract_estimate_days(task, ms_per_day)
     if estimate_days is None:
-        return None
+        if not fallback_days or fallback_days <= 0:
+            return None
+        estimate_days = fallback_days
     now_utc = datetime.now(timezone.utc)
     # Respeitar start_date: due_date nunca pode ser anterior ao inicio da task.
     raw_start = task.get("start_date")
