@@ -145,7 +145,8 @@ Versionamento segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
 - `register_webhook.py`: script auxiliar para registrar o endpoint no workspace.
 - Unidades systemd (`clickup-deadline-daemon.service`) para execução como serviço.
 
-[Não lançado]: https://github.com/thalsime/clickup-deadline-daemon/compare/v1.2.0...HEAD
+[Não lançado]: https://github.com/thalsime/clickup-deadline-daemon/compare/v1.3.0...HEAD
+[1.3.0]: https://github.com/thalsime/clickup-deadline-daemon/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/thalsime/clickup-deadline-daemon/compare/v1.1.3...v1.2.0
 [1.1.3]: https://github.com/thalsime/clickup-deadline-daemon/compare/v1.1.2...v1.1.3
 [1.1.2]: https://github.com/thalsime/clickup-deadline-daemon/compare/v1.1.1...v1.1.2
