@@ -1,5 +1,5 @@
 """
-clickup-deadline-daemon  v1.2.0
+clickup-deadline-daemon  v1.3.0
 ===============================
 Webhook receiver que:
   1. Calcula due_date quando uma task muda para "em progresso" ou recebe um assignee.
@@ -121,7 +121,7 @@ async def get_task(client: httpx.AsyncClient, task_id: str) -> dict:
     """Busca os detalhes completos de uma task, incluindo time_estimate e assignees."""
     resp = await client.get(
         f"{CLICKUP_API_BASE}/task/{task_id}",
-        params={"include_subtasks": "false"},
+        params={"include_subtasks": "true"},
     )
     if not resp.is_success:
         log.error(
@@ -218,6 +218,16 @@ def extract_estimate_days(task: dict) -> int | None:
     if estimate_ms <= 0:
         return None
     return math.ceil(estimate_ms / MS_PER_DAY)
+
+
+def is_supertask(task: dict) -> bool:
+    """
+    True se a task tem subtasks (e mae/supertask). Requer task buscada com
+    include_subtasks=true (o campo "subtasks" so vem preenchido nesse caso).
+    Supertasks nao recebem prazo proprio nem fallback: o esforco vive nas subtasks,
+    e dar prazo a mae mascararia o rollup.
+    """
+    return bool(task.get("subtasks"))
 
 
 def compute_due_date_ms(task: dict, fallback_days: int | None = None) -> int | None:
@@ -325,6 +335,14 @@ async def apply_due_date(
         dict com chave "action": "due_date_set" | "skipped" e detalhes.
     """
     task_name = task.get("name", "")
+
+    # Supertasks nao recebem prazo proprio: o esforco vive nas subtasks (rollup).
+    if is_supertask(task):
+        log.info(
+            "Task %s ('%s'): supertask -- prazo proprio nao aplicado (vem das subtasks).",
+            task_id, task_name,
+        )
+        return {"task_id": task_id, "action": "skipped", "reason": "supertask - prazo vem das subtasks"}
 
     raw_due = task.get("due_date")
     due_date_set = raw_due is not None and raw_due != 0 and raw_due != "0"
@@ -513,7 +531,7 @@ async def lifespan(app: FastAPI):
 # App
 # ---------------------------------------------------------------------------
 
-app = FastAPI(title="ClickUp Deadline Daemon", version="1.2.0", lifespan=lifespan)
+app = FastAPI(title="ClickUp Deadline Daemon", version="1.3.0", lifespan=lifespan)
 
 # ---------------------------------------------------------------------------
 # Helpers -- assinatura

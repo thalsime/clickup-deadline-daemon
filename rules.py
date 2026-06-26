@@ -31,7 +31,7 @@ async def get_task(client: httpx.AsyncClient, task_id: str) -> dict:
     """Busca os detalhes completos de uma task."""
     resp = await client.get(
         f"{CLICKUP_API_BASE}/task/{task_id}",
-        params={"include_subtasks": "false"},
+        params={"include_subtasks": "true"},
     )
     if not resp.is_success:
         log.error(
@@ -55,7 +55,7 @@ async def get_list_tasks(
         f"{CLICKUP_API_BASE}/list/{list_id}/task",
         params={
             "include_closed": "false",
-            "subtasks":       "false",
+            "subtasks":       "true",
             "page":           str(page),
         },
     )
@@ -202,3 +202,14 @@ def due_date_is_set(task: dict) -> bool:
     """
     raw = task.get("due_date")
     return raw is not None and raw != 0 and raw != "0"
+
+
+def is_supertask(task: dict) -> bool:
+    """
+    Retorna True se a task possui subtasks (e mae/supertask).
+
+    Requer que a task tenha sido buscada com include_subtasks=true (o campo "subtasks"
+    so vem preenchido nesse caso). Supertasks nao recebem prazo proprio nem fallback:
+    o esforco real vive nas subtasks, e dar prazo a mae mascararia o rollup.
+    """
+    return bool(task.get("subtasks"))
