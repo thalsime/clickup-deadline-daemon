@@ -21,12 +21,14 @@ if _DAEMON_DIR not in sys.path:
 
 # Definir variável antes de importar o módulo (o import lê CLICKUP_API_TOKEN no topo)
 os.environ.setdefault("CLICKUP_API_TOKEN", "pk_dummy_test_token")
+os.environ.setdefault("RECONCILE_LIST_IDS", "test-list-id")
 
-import audit as _audit
-import main
+import audit as _audit  # noqa: E402
+import main  # noqa: E402
+import reconcile  # noqa: E402
 
 # Re-exportar para continuidade dos testes existentes
-from main import (
+from main import (  # noqa: E402
     extract_estimate_days,
     should_trigger_on_assignee,
     should_trigger_on_status,
@@ -63,9 +65,9 @@ def fresh_audit_db(tmp_path, monkeypatch):
 # Helpers de factory
 # ===========================================================================
 
-def make_task(time_estimate, assignees=None, due_date=None, status="pendente") -> dict:
+def make_task(time_estimate, assignees=None, due_date=None, status="pendente", subtasks=None) -> dict:
     """Cria um dict de task com os campos relevantes."""
-    return {
+    task = {
         "id":            "task-001",
         "name":          "Teste",
         "time_estimate": time_estimate,
@@ -73,6 +75,9 @@ def make_task(time_estimate, assignees=None, due_date=None, status="pendente") -
         "due_date":      due_date,
         "status":        {"status": status},
     }
+    if subtasks is not None:
+        task["subtasks"] = subtasks
+    return task
 
 
 def make_status_event(new_status: str, actor_id: int = 111111) -> dict:
@@ -906,3 +911,131 @@ async def test_audit_set_daemon_action(fresh_audit_db):
 
     assert row is not None
     assert row[0] == "due_date_set", f"daemon_action esperado 'due_date_set', obtido {row[0]!r}"
+
+
+# ===========================================================================
+# Hierarquia: supertasks nao recebem prazo proprio; subtasks sim (v1.3.0)
+# ===========================================================================
+
+def test_is_supertask_true_com_subtasks():
+    assert main.is_supertask(make_task(None, subtasks=[{"id": "sub-1"}])) is True
+
+
+def test_is_supertask_false_sem_subtasks():
+    assert main.is_supertask(make_task(14_400_000)) is False
+    assert main.is_supertask(make_task(14_400_000, subtasks=[])) is False
+
+
+@pytest.mark.asyncio
+async def test_apply_due_date_pula_supertask(monkeypatch):
+    """Supertask (com subtasks) nao recebe due_date nem fallback."""
+    task = make_task(None, due_date=None, subtasks=[{"id": "sub-1"}])
+    dues, comments = [], []
+
+    async def mock_set_due_date(client, task_id, ms):
+        dues.append(ms)
+
+    async def mock_post_comment(client, task_id, text):
+        comments.append(text)
+
+    monkeypatch.setattr(main, "set_due_date", mock_set_due_date)
+    monkeypatch.setattr(main, "post_comment", mock_post_comment)
+
+    async with httpx.AsyncClient() as client:
+        result = await main.apply_due_date(client, "task-001", task)
+
+    assert result["action"] == "skipped"
+    assert "supertask" in result["reason"]
+    assert dues == []
+    assert comments == []
+
+
+@pytest.mark.asyncio
+async def test_apply_due_date_task_plana_sem_estimate_usa_fallback(monkeypatch):
+    """Task sem subtasks e sem time_estimate mantem o fallback (comportamento v1.2.0)."""
+    task = make_task(None, due_date=None)  # sem subtasks
+    dues, comments = [], []
+
+    async def mock_set_due_date(client, task_id, ms):
+        dues.append(ms)
+
+    async def mock_post_comment(client, task_id, text):
+        comments.append(text)
+
+    monkeypatch.setattr(main, "set_due_date", mock_set_due_date)
+    monkeypatch.setattr(main, "post_comment", mock_post_comment)
+    monkeypatch.setattr(main, "FALLBACK_ESTIMATE_DAYS", 2)
+
+    async with httpx.AsyncClient() as client:
+        result = await main.apply_due_date(client, "task-001", task)
+
+    assert result["action"] == "due_date_set_fallback"
+    assert len(dues) == 1
+    assert len(comments) == 1
+
+
+@pytest.mark.asyncio
+async def test_handle_status_supertask_nao_seta_due_mas_atribui(monkeypatch):
+    """Supertask em progresso: nao seta due_date, mas ainda atribui o ator (assignee)."""
+    task  = make_task(None, assignees=[], due_date=None, subtasks=[{"id": "sub-1"}])
+    event = make_status_event("em progresso", actor_id=111111)
+    dues, assignees_added = [], []
+
+    async def mock_get_task(client, task_id):
+        return task
+
+    async def mock_set_due_date(client, task_id, ms):
+        dues.append(ms)
+
+    async def mock_add_assignee(client, task_id, user_id):
+        assignees_added.append(user_id)
+
+    monkeypatch.setattr(main, "get_task",     mock_get_task)
+    monkeypatch.setattr(main, "set_due_date", mock_set_due_date)
+    monkeypatch.setattr(main, "add_assignee", mock_add_assignee)
+    monkeypatch.setattr(main, "TOKEN_OWNER_ID", 222222)
+
+    async with httpx.AsyncClient() as client:
+        await main.handle_status_in_progress(client, "task-001", event)
+
+    assert dues == []                   # supertask nao recebe prazo proprio
+    assert assignees_added == [111111]  # mas o ator e atribuido normalmente
+
+
+@pytest.mark.asyncio
+async def test_reconcile_task_pula_supertask(monkeypatch):
+    """No reconciliador, supertask (is_supertask=True) nao recebe due_date nem fallback."""
+    task = make_task(None, due_date=None, status="em progresso")
+    dues = []
+
+    async def mock_set_due_date(client, task_id, ms):
+        dues.append(ms)
+
+    monkeypatch.setattr(reconcile, "set_due_date", mock_set_due_date)
+    monkeypatch.setattr(reconcile, "DRY_RUN", False)
+
+    async with httpx.AsyncClient() as client:
+        result = await reconcile.reconcile_task(client, task, is_supertask=True)
+
+    assert dues == []
+    assert "due_date_set" not in result["actions"]
+    assert "due_date_set_fallback" not in result["actions"]
+
+
+@pytest.mark.asyncio
+async def test_reconcile_task_subtask_recebe_due_date(monkeypatch):
+    """Subtask (folha, is_supertask=False) em progresso com estimate recebe due_date."""
+    task = make_task(14_400_000, due_date=None, status="em progresso")
+    dues = []
+
+    async def mock_set_due_date(client, task_id, ms):
+        dues.append(ms)
+
+    monkeypatch.setattr(reconcile, "set_due_date", mock_set_due_date)
+    monkeypatch.setattr(reconcile, "DRY_RUN", False)
+
+    async with httpx.AsyncClient() as client:
+        result = await reconcile.reconcile_task(client, task, is_supertask=False)
+
+    assert len(dues) == 1
+    assert "due_date_set" in result["actions"]
