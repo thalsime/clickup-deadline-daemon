@@ -109,13 +109,18 @@ log = logging.getLogger("reconciler")
 # Logica por task
 # ---------------------------------------------------------------------------
 
-async def reconcile_task(client: httpx.AsyncClient, task: dict) -> dict:
+async def reconcile_task(
+    client: httpx.AsyncClient, task: dict, is_supertask: bool = False
+) -> dict:
     """
     Aplica invariantes idempotentes a uma unica task.
 
     Regras:
     - Status em TRIGGER_STATUSES + sem due_date + com time_estimate -> set_due_date.
     - Status em PENDING_STATUSES + com responsavel -> promover para TARGET_STATUS.
+
+    Supertasks (is_supertask=True) nao recebem prazo proprio nem fallback: o esforco
+    vive nas subtasks. As demais regras (promocao de status) continuam valendo.
 
     Retorna um dict com as acoes tomadas (ou que seriam tomadas em dry-run).
     """
@@ -127,7 +132,17 @@ async def reconcile_task(client: httpx.AsyncClient, task: dict) -> dict:
     actions     = []
 
     # Regra de due_date: status de trigger + sem prazo + com estimativa.
-    if status_low in TRIGGER_STATUSES and not due_date_is_set(task):
+    # Supertasks sao puladas aqui: o prazo vem do rollup das subtasks, nao da mae.
+    if (
+        is_supertask
+        and status_low in TRIGGER_STATUSES
+        and not due_date_is_set(task)
+    ):
+        log.info(
+            "Task %s ('%s'): supertask -- prazo proprio nao aplicado (vem das subtasks).",
+            task_id, task_name,
+        )
+    elif status_low in TRIGGER_STATUSES and not due_date_is_set(task):
         estimate_days = extract_estimate_days(task, MS_PER_DAY)
         if estimate_days is not None:
             due_ms = compute_due_date_ms(task, MS_PER_DAY)
@@ -222,9 +237,16 @@ async def reconcile_task(client: httpx.AsyncClient, task: dict) -> dict:
 # ---------------------------------------------------------------------------
 
 async def reconcile_list(client: httpx.AsyncClient, list_id: str) -> list[dict]:
-    """Varre todas as paginas de uma lista e reconcilia cada task."""
-    results = []
-    page    = 0
+    """
+    Varre todas as paginas de uma lista e reconcilia cada task, incluindo subtasks.
+
+    A listagem usa subtasks=true, entao as subtasks vem planas (cada uma com seu
+    campo "parent"). Identificamos as supertasks (maes) como os ids referenciados por
+    algum "parent": elas nao recebem prazo proprio (ver reconcile_task).
+    """
+    results   = []
+    all_tasks = []
+    page      = 0
     while True:
         try:
             data      = await get_list_tasks(client, list_id, page=page)
@@ -235,14 +257,19 @@ async def reconcile_list(client: httpx.AsyncClient, list_id: str) -> list[dict]:
             break
 
         log.info("Lista %s: page=%d, %d tasks", list_id, page, len(tasks))
-        for task in tasks:
-            result = await reconcile_task(client, task)
-            if result["actions"]:
-                results.append(result)
+        all_tasks.extend(tasks)
 
         if last_page or not tasks:
             break
         page += 1
+
+    # Ids que sao "parent" de alguma subtask -> supertasks (maes).
+    parent_ids = {t["parent"] for t in all_tasks if t.get("parent")}
+    for task in all_tasks:
+        is_super = task.get("id") in parent_ids
+        result   = await reconcile_task(client, task, is_supertask=is_super)
+        if result["actions"]:
+            results.append(result)
 
     return results
 

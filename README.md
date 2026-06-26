@@ -1,6 +1,6 @@
 # clickup-deadline-daemon
 
-> **v1.2.0** -- [CHANGELOG](CHANGELOG.md)
+> **v1.3.0** -- [CHANGELOG](CHANGELOG.md)
 
 Daemon de automação do ClickUp que executa três regras quando tasks mudam de estado:
 
@@ -32,6 +32,12 @@ Regras comuns a todas:
   que o ClickUp retorna quando `due_date` calculado ficaria antes do `start_date` da task.
 - Não sobrescreve `due_date` já definida manualmente (logo, o comentário do fallback é
   postado uma única vez: na passagem seguinte a `due_date` já existe e a task é pulada).
+- **Supertasks (tasks com subtasks) não recebem prazo próprio nem fallback:** o esforço
+  real vive nas subtasks, e dar prazo à mãe mascararia o rollup. As subtasks (folhas) são
+  tratadas normalmente. A detecção usa o campo `subtasks` (busca com `include_subtasks=true`);
+  o reconciliador identifica as mães pelos ids referenciados em algum `parent`. A atribuição
+  automática de responsável (Regra 1) continua valendo para a supertask -- só o **prazo** é
+  pulado.
 - Compatível com o plano **Free** do ClickUp (usa webhooks nativos, sem custom fields).
 - O banco de auditoria (`audit.db`) contém PII -- **nunca versionar**.
 
@@ -280,8 +286,9 @@ pytest test_main.py -v
 ```
 
 Os testes cobrem: predicados puros (`get_actor_id`, `is_self_action`, `compute_due_date_ms`,
-`due_date_is_set`, `is_assignee_add`), as três regras de automação, o anti-loop, o dedup de
-auditoria e a discriminação add/rem no `taskAssigneeUpdated`. Total: **48 testes**.
+`due_date_is_set`, `is_assignee_add`, `is_supertask`), as três regras de automação, o fallback
+de estimativa, o tratamento de hierarquia (supertask pulada, subtask reconciliada), o anti-loop,
+o dedup de auditoria e a discriminação add/rem no `taskAssigneeUpdated`. Total: **60 testes**.
 Requer `pytest>=8.3` e `pytest-asyncio>=0.24` (instalados via `requirements-dev.txt`).
 
 ---
@@ -483,7 +490,7 @@ clickup-deadline-daemon/
 -- rules.py                          # Predicados e calculo de due_date (compartilhado)
 -- audit.py                          # Modulo de auditoria SQLite
 -- reconcile.py                      # Reconciliador idempotente (varre listas a cada 10 min)
--- test_main.py                      # Testes unitarios (53 testes)
+-- test_main.py                      # Testes unitarios (60 testes)
 -- register_webhook.py               # Script para registrar/listar/atualizar/remover webhooks
 -- requirements.txt                  # Dependencias de producao
 -- requirements-dev.txt              # Dependencias de desenvolvimento (pytest, pytest-asyncio)
