@@ -9,6 +9,49 @@ Versionamento segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
 
 ## [Não lançado]
 
+## [1.3.0] - 2026-06-26
+
+### Adicionado
+
+- Tratamento de hierarquia (supertask/subtasks): o daemon passa a reconhecer quando
+  uma task tem subtasks (supertask) e **não** aplica prazo próprio nem fallback a ela --
+  o esforço real vive nas subtasks, e dar prazo à mãe mascararia o rollup. As subtasks
+  (folhas) continuam recebendo `due_date` normalmente quando entram no gatilho com
+  `time_estimate`. Vale para o webhook (`main.py`) e o reconciliador (`reconcile.py`).
+- Helper `is_supertask(task)` (em `main.py` e `rules.py`): retorna `True` quando o campo
+  `subtasks` vem populado (requer busca com `include_subtasks=true`).
+- O reconciliador passa a varrer subtasks: `get_list_tasks` usa `subtasks=true` e
+  `reconcile_list` identifica as supertasks pelos ids referenciados em algum `parent`,
+  repassando `is_supertask` a `reconcile_task` para pular o prazo próprio delas.
+- Testes de hierarquia em `test_main.py` (supertask pulada no webhook e no reconciliador,
+  subtask recebe prazo, task plana mantém o fallback, supertask ainda recebe responsável)
+  -- 60 testes no total.
+
+### Alterado
+
+- `get_task` (webhook e `rules.py`) passa a buscar com `include_subtasks=true`, para
+  enxergar as subtasks no payload da task.
+
+## [1.2.0] - 2026-06-22
+
+### Adicionado
+
+- Fallback de estimativa: quando a task entra no gatilho (status de trigger ou
+  adição de responsável) sem `time_estimate` e ainda sem `due_date`, o daemon usa
+  `FALLBACK_ESTIMATE_DAYS` dias úteis (padrão 2), grava a `due_date` e posta um
+  comentário avisando que a estimativa estava ausente, que o prazo pode não ser real
+  e que se recomenda revisão. `FALLBACK_ESTIMATE_DAYS=0` desativa (volta ao
+  comportamento de apenas pular). Vale para o webhook (`main.py`) e o reconciliador
+  (`reconcile.py` via `rules.py`). Nova `daemon_action`: `due_date_set_fallback`.
+- Helpers `post_comment` e `fallback_comment_text` (em `main.py` e `rules.py`) e o
+  parâmetro `fallback_days` em `compute_due_date_ms`.
+- Variável de ambiente `FALLBACK_ESTIMATE_DAYS` (padrão `2`), documentada no
+  `.env.example` e no `README.md`.
+- Testes do fallback em `test_main.py` (aplica, desativado, com estimativa, due já
+  definido) -- 53 testes no total.
+
+---
+
 ## [1.1.3] - 2026-06-08
 
 ### Corrigido
@@ -102,7 +145,8 @@ Versionamento segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
 - `register_webhook.py`: script auxiliar para registrar o endpoint no workspace.
 - Unidades systemd (`clickup-deadline-daemon.service`) para execução como serviço.
 
-[Não lançado]: https://github.com/thalsime/clickup-deadline-daemon/compare/v1.1.3...HEAD
+[Não lançado]: https://github.com/thalsime/clickup-deadline-daemon/compare/v1.2.0...HEAD
+[1.2.0]: https://github.com/thalsime/clickup-deadline-daemon/compare/v1.1.3...v1.2.0
 [1.1.3]: https://github.com/thalsime/clickup-deadline-daemon/compare/v1.1.2...v1.1.3
 [1.1.2]: https://github.com/thalsime/clickup-deadline-daemon/compare/v1.1.1...v1.1.2
 [1.1.1]: https://github.com/thalsime/clickup-deadline-daemon/compare/v1.1.0...v1.1.1

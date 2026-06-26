@@ -1,5 +1,5 @@
 """
-clickup-deadline-daemon  v1.1.3
+clickup-deadline-daemon  v1.3.0
 ===============================
 Webhook receiver que:
   1. Calcula due_date quando uma task muda para "em progresso" ou recebe um assignee.
@@ -13,8 +13,11 @@ audita. Se o TOKEN_OWNER_ID não for resolvido, adota postura conservadora: só 
 não executa ações de escrita.
 
 Regras de due_date:
-  - Age somente se a task tiver time_estimate (esforço em ms) preenchido.
-  - Converte em dias úteis pela base 4h/dia (MS_PER_DAY), arredondando para cima.
+  - Com time_estimate: converte em dias úteis pela base 4h/dia (MS_PER_DAY),
+    arredondando para cima.
+  - Sem time_estimate: aplica um fallback de FALLBACK_ESTIMATE_DAYS dias úteis (default 2),
+    grava a due_date e comenta na task pedindo revisão (o prazo pode não ser real).
+    FALLBACK_ESTIMATE_DAYS=0 desativa o fallback (volta ao comportamento de só pular).
   - Não sobrescreve due_date já definida manualmente.
 """
 
@@ -62,6 +65,11 @@ PENDING_STATUSES = {
     for s in os.environ.get("PENDING_STATUSES", "pendente").split(",")
     if s.strip()
 }
+
+# Fallback de estimativa: quando a task entra no gatilho sem time_estimate, em vez de
+# pular, o daemon usa este número de dias úteis como estimativa padrão, grava a due_date
+# e comenta na task pedindo revisão. 0 desativa o fallback (volta ao skip silencioso).
+FALLBACK_ESTIMATE_DAYS = int(os.environ.get("FALLBACK_ESTIMATE_DAYS", 2))
 
 # Backend de auditoria e caminho do arquivo SQLite.
 AUDIT_BACKEND = os.environ.get("AUDIT_BACKEND", "sqlite")
@@ -113,7 +121,7 @@ async def get_task(client: httpx.AsyncClient, task_id: str) -> dict:
     """Busca os detalhes completos de uma task, incluindo time_estimate e assignees."""
     resp = await client.get(
         f"{CLICKUP_API_BASE}/task/{task_id}",
-        params={"include_subtasks": "false"},
+        params={"include_subtasks": "true"},
     )
     if not resp.is_success:
         log.error(
@@ -165,6 +173,30 @@ async def set_status(client: httpx.AsyncClient, task_id: str, status: str) -> No
         )
     resp.raise_for_status()
 
+
+async def post_comment(client: httpx.AsyncClient, task_id: str, text: str) -> None:
+    """Posta um comentário na task (POST /task/{id}/comment), sem notificar todos."""
+    resp = await client.post(
+        f"{CLICKUP_API_BASE}/task/{task_id}/comment",
+        json={"comment_text": text, "notify_all": False},
+    )
+    if not resp.is_success:
+        log.error(
+            "ClickUp POST /task/%s/comment -> %d: %s",
+            task_id, resp.status_code, resp.text[:500],
+        )
+    resp.raise_for_status()
+
+
+def fallback_comment_text(days: int) -> str:
+    """Texto do comentário postado quando o prazo é definido pelo fallback (sem time_estimate)."""
+    return (
+        f"Prazo definido automaticamente com estimativa padrão de {days} dias úteis "
+        "porque esta tarefa estava sem estimativa de esforço (time_estimate). "
+        "Este prazo pode não refletir o esforço real - recomenda-se revisar a "
+        "estimativa de esforço e ajustar o prazo, se necessário."
+    )
+
 # ---------------------------------------------------------------------------
 # Helpers -- extração e predicados
 # ---------------------------------------------------------------------------
@@ -188,7 +220,17 @@ def extract_estimate_days(task: dict) -> int | None:
     return math.ceil(estimate_ms / MS_PER_DAY)
 
 
-def compute_due_date_ms(task: dict) -> int | None:
+def is_supertask(task: dict) -> bool:
+    """
+    True se a task tem subtasks (e mae/supertask). Requer task buscada com
+    include_subtasks=true (o campo "subtasks" so vem preenchido nesse caso).
+    Supertasks nao recebem prazo proprio nem fallback: o esforco vive nas subtasks,
+    e dar prazo a mae mascararia o rollup.
+    """
+    return bool(task.get("subtasks"))
+
+
+def compute_due_date_ms(task: dict, fallback_days: int | None = None) -> int | None:
     """
     Calcula o timestamp ms da due_date a partir de time_estimate.
 
@@ -196,11 +238,14 @@ def compute_due_date_ms(task: dict) -> int | None:
     O ClickUp rejeita com 400 um PUT de due_date anterior ao start_date existente
     (confirmado em producao: task 86e1qtczy retornou 400 por este motivo).
 
-    Retorna None se time_estimate não estiver definido ou for inválido.
+    Sem time_estimate: retorna None, a menos que fallback_days (> 0) seja informado --
+    nesse caso usa fallback_days como estimativa padrão (ver FALLBACK_ESTIMATE_DAYS).
     """
     estimate_days = extract_estimate_days(task)
     if estimate_days is None:
-        return None
+        if not fallback_days or fallback_days <= 0:
+            return None
+        estimate_days = fallback_days
     now_utc = datetime.now(timezone.utc)
     # Respeitar start_date: due_date nunca pode ser anterior ao início da task.
     raw_start = task.get("start_date")
@@ -291,23 +336,58 @@ async def apply_due_date(
     """
     task_name = task.get("name", "")
 
+    # Supertasks nao recebem prazo proprio: o esforco vive nas subtasks (rollup).
+    if is_supertask(task):
+        log.info(
+            "Task %s ('%s'): supertask -- prazo proprio nao aplicado (vem das subtasks).",
+            task_id, task_name,
+        )
+        return {"task_id": task_id, "action": "skipped", "reason": "supertask - prazo vem das subtasks"}
+
     raw_due = task.get("due_date")
     due_date_set = raw_due is not None and raw_due != 0 and raw_due != "0"
     if due_date_set:
         log.info("Task %s ('%s'): já tem due_date -- ignorando.", task_id, task_name)
         return {"task_id": task_id, "action": "skipped", "reason": "due_date already set"}
 
+    estimate_days = extract_estimate_days(task)
     due_ms = compute_due_date_ms(task)
-    if due_ms is None:
-        raw_estimate = task.get("time_estimate")
-        log.warning(
-            "Task %s ('%s'): time_estimate ausente ou inválido (valor_bruto=%r)"
-            " -- prazo não será definido.",
-            task_id, task_name, raw_estimate,
-        )
-        return {"task_id": task_id, "action": "skipped", "reason": "time_estimate not set"}
 
-    estimate_days = extract_estimate_days(task)   # mesmo valor já usado em compute_due_date_ms
+    # Sem time_estimate: aplicar o fallback (se habilitado) em vez de pular.
+    if due_ms is None:
+        if FALLBACK_ESTIMATE_DAYS and FALLBACK_ESTIMATE_DAYS > 0:
+            due_ms = compute_due_date_ms(task, fallback_days=FALLBACK_ESTIMATE_DAYS)
+        if due_ms is None:
+            raw_estimate = task.get("time_estimate")
+            log.warning(
+                "Task %s ('%s'): time_estimate ausente ou inválido (valor_bruto=%r)"
+                " -- prazo não será definido.",
+                task_id, task_name, raw_estimate,
+            )
+            return {"task_id": task_id, "action": "skipped", "reason": "time_estimate not set"}
+
+        # Fallback aplicado: gravar prazo e comentar pedindo revisão.
+        await set_due_date(client, task_id, due_ms)
+        due_dt = datetime.fromtimestamp(due_ms / 1000, tz=timezone.utc)
+        log.warning(
+            "Task %s ('%s'): sem time_estimate -- prazo definido pelo fallback de %d dias"
+            " úteis (%s); comentando para revisão.",
+            task_id, task_name, FALLBACK_ESTIMATE_DAYS, due_dt.strftime("%Y-%m-%d"),
+        )
+        result = {
+            "task_id":    task_id,
+            "action":     "due_date_set_fallback",
+            "due_date":   due_dt.strftime("%Y-%m-%d"),
+            "days_added": FALLBACK_ESTIMATE_DAYS,
+        }
+        try:
+            await post_comment(client, task_id, fallback_comment_text(FALLBACK_ESTIMATE_DAYS))
+        except Exception as exc:
+            log.error("Task %s: prazo do fallback definido, mas falha ao comentar: %s", task_id, exc)
+            result["comment_error"] = str(exc)
+        return result
+
+    # Caminho normal: time_estimate presente.
     await set_due_date(client, task_id, due_ms)
     due_dt = datetime.fromtimestamp(due_ms / 1000, tz=timezone.utc)
     log.info(
@@ -451,7 +531,7 @@ async def lifespan(app: FastAPI):
 # App
 # ---------------------------------------------------------------------------
 
-app = FastAPI(title="ClickUp Deadline Daemon", version="1.1.3", lifespan=lifespan)
+app = FastAPI(title="ClickUp Deadline Daemon", version="1.3.0", lifespan=lifespan)
 
 # ---------------------------------------------------------------------------
 # Helpers -- assinatura
