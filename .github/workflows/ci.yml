@@ -33,5 +33,9 @@ jobs:
 
       - name: Lint with ruff
         run: |
-          pip install ruff
-          ruff check main.py audit.py register_webhook.py
+          # Versao fixada de proposito: sem pin, o CI instala a mais recente do dia e o
+          # conjunto de regras default muda entre versoes -- o lint passou a falhar em
+          # codigo que nao havia mudado quando o ruff 0.16.0 promoveu novas regras.
+          # O conjunto de regras em si vive no ruff.toml.
+          pip install ruff==0.16.0
+          ruff check .

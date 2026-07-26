@@ -1,9 +1,9 @@
 """
 reconcile.py
 ============
-Reconciliador idempotente: varre listas do ClickUp e aplica as regras de
-due_date e promocao de status que o webhook possa ter perdido (502, falha
-transitoria, restart do daemon, eventos anteriores ao deploy).
+Reconciliador idempotente: varre listas do ClickUp e aplica a regra de due_date
+que o webhook possa ter perdido (502, falha transitoria, restart do daemon,
+eventos anteriores ao deploy).
 
 Uso:
   # Visualizar sem escrever (dry-run):
@@ -13,21 +13,24 @@ Uso:
   python reconcile.py
 
   # Limitar a listas especificas (IDs separados por virgula):
-  RECONCILE_LIST_IDS=901714316812,901714316813 python reconcile.py
+  RECONCILE_LIST_IDS=<LIST_ID_1>,<LIST_ID_2> python reconcile.py
 
 Variaveis de ambiente (compartilhadas com o daemon via .env):
   CLICKUP_API_TOKEN    -- obrigatoria
   MS_PER_DAY           -- milissegundos por dia util (default 14400000 = 4h)
   TRIGGER_STATUSES     -- statuses que exigem due_date (default: em progresso,in progress)
-  TARGET_STATUS        -- status-alvo da promocao (default: em progresso)
-  PENDING_STATUSES     -- statuses que recebem promocao quando tem responsavel (default: pendente)
 
 Variaveis especificas do reconciliador:
   RECONCILE_LIST_IDS   -- IDs de listas a varrer (csv); obrigatoria
   RECONCILE_DRY_RUN    -- se "1" ou "true", apenas loga sem escrever
 
-O reconciliador NAO toca "atribuir quem moveu o status" (Regra 1 parte 2):
-essa logica depende do ator do evento original e e exclusiva do webhook.
+O reconciliador so aplica regras que podem ser decididas pelo ESTADO da task.
+Duas regras dependem do ATOR do evento e por isso sao exclusivas do webhook:
+  - "atribuir quem moveu o status" (Regra 1, parte 2);
+  - a promocao de status da Regra 2 que, desde a v2.0.0, so vale quando a pessoa
+    se auto-atribui. O reconciliador ve "pendente + tem responsavel", mas nao tem
+    como saber QUEM atribuiu -- promover aqui reintroduziria justamente o
+    comportamento que a v2.0.0 removeu, e de forma reincidente (a cada 10 min).
 """
 
 import asyncio
@@ -45,7 +48,6 @@ from rules import (
     get_list_tasks,
     post_comment,
     set_due_date,
-    set_status,
 )
 
 # ---------------------------------------------------------------------------
@@ -57,7 +59,7 @@ if not CLICKUP_API_TOKEN:
     print("Erro: variavel de ambiente CLICKUP_API_TOKEN nao definida.", file=sys.stderr)
     sys.exit(1)
 
-MS_PER_DAY = int(os.environ.get("MS_PER_DAY", 14_400_000))
+MS_PER_DAY = int(os.environ.get("MS_PER_DAY", "14400000"))
 
 TRIGGER_STATUSES = {
     s.strip().lower()
@@ -65,17 +67,12 @@ TRIGGER_STATUSES = {
     if s.strip()
 }
 
-TARGET_STATUS = os.environ.get("TARGET_STATUS", "em progresso")
-
-PENDING_STATUSES = {
-    s.strip().lower()
-    for s in os.environ.get("PENDING_STATUSES", "pendente").split(",")
-    if s.strip()
-}
+# TARGET_STATUS e PENDING_STATUSES nao sao lidos aqui desde a v2.0.0: a promocao de
+# status saiu do reconciliador (depende do ator do evento). Continuam validos no webhook.
 
 # Fallback de estimativa (mesma semantica do daemon): sem time_estimate, usa este numero
 # de dias uteis como estimativa padrao, grava a due_date e comenta. 0 desativa.
-FALLBACK_ESTIMATE_DAYS = int(os.environ.get("FALLBACK_ESTIMATE_DAYS", 2))
+FALLBACK_ESTIMATE_DAYS = int(os.environ.get("FALLBACK_ESTIMATE_DAYS", "2"))
 
 _list_ids_raw = os.environ.get("RECONCILE_LIST_IDS", "")
 LIST_IDS: list[str] = [lid.strip() for lid in _list_ids_raw.split(",") if lid.strip()]
@@ -115,20 +112,18 @@ async def reconcile_task(
     """
     Aplica invariantes idempotentes a uma unica task.
 
-    Regras:
+    Regra unica (v2.0.0):
     - Status em TRIGGER_STATUSES + sem due_date + com time_estimate -> set_due_date.
-    - Status em PENDING_STATUSES + com responsavel -> promover para TARGET_STATUS.
+      Sem time_estimate, aplica o fallback e comenta na task (ver FALLBACK_ESTIMATE_DAYS).
 
     Supertasks (is_supertask=True) nao recebem prazo proprio nem fallback: o esforco
-    vive nas subtasks. As demais regras (promocao de status) continuam valendo.
+    vive nas subtasks.
 
     Retorna um dict com as acoes tomadas (ou que seriam tomadas em dry-run).
     """
     task_id     = task.get("id", "")
     task_name   = task.get("name", "")
-    status_raw  = task.get("status", {}).get("status", "")
-    status_low  = status_raw.lower().strip()
-    assignees   = task.get("assignees") or []
+    status_low  = task.get("status", {}).get("status", "").lower().strip()
     actions     = []
 
     # Regra de due_date: status de trigger + sem prazo + com estimativa.
@@ -207,27 +202,7 @@ async def reconcile_task(
                 task_id, task_name,
             )
 
-    # Regra de promocao: pendente + tem responsavel -> promover.
-    if status_low in PENDING_STATUSES and assignees:
-        if DRY_RUN:
-            log.info(
-                "[DRY-RUN] Task %s ('%s'): set_status -> '%s'.",
-                task_id, task_name, TARGET_STATUS,
-            )
-        else:
-            try:
-                await set_status(client, task_id, TARGET_STATUS)
-                log.info(
-                    "Task %s ('%s'): status '%s' -> '%s'.",
-                    task_id, task_name, status_raw, TARGET_STATUS,
-                )
-                actions.append("status_promoted")
-            except Exception as exc:
-                log.error(
-                    "Task %s ('%s'): falha ao set_status: %s",
-                    task_id, task_name, exc,
-                )
-                actions.append(f"status_error:{exc}")
+    # A promocao de status NAO acontece aqui desde a v2.0.0: ver a docstring do modulo.
 
     return {"task_id": task_id, "actions": actions}
 
@@ -240,9 +215,11 @@ async def reconcile_list(client: httpx.AsyncClient, list_id: str) -> list[dict]:
     """
     Varre todas as paginas de uma lista e reconcilia cada task, incluindo subtasks.
 
-    A listagem usa subtasks=true, entao as subtasks vem planas (cada uma com seu
-    campo "parent"). Identificamos as supertasks (maes) como os ids referenciados por
-    algum "parent": elas nao recebem prazo proprio (ver reconcile_task).
+    A listagem usa subtasks=true e include_closed=true, entao as subtasks vem planas
+    (cada uma com seu campo "parent") INCLUSIVE as ja concluidas. Identificamos as
+    supertasks (maes) como os ids referenciados por algum "parent": elas nao recebem
+    prazo proprio (ver reconcile_task). Sem include_closed=true, uma mae cujas subtasks
+    estao todas concluidas escaparia da deteccao (bug corrigido na v2.0.0).
     """
     results   = []
     all_tasks = []
