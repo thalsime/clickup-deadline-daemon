@@ -1,6 +1,6 @@
 # clickup-deadline-daemon
 
-> **v1.3.0** -- [CHANGELOG](CHANGELOG.md)
+> **v2.0.0** -- [CHANGELOG](CHANGELOG.md)
 
 Daemon de automação do ClickUp que executa três regras quando tasks mudam de estado:
 
@@ -11,9 +11,19 @@ o `due_date` a partir do `time_estimate`. Se o ator do evento não estiver dispo
 payload (ex.: automações nativas do ClickUp), o daemon loga um WARNING e calcula o
 `due_date` sem atribuir responsável.
 
-**Regra 2 -- Assignee em task pendente:** quando alguém é atribuído a uma task cujo
-status está em `PENDING_STATUSES` (ex.: "pendente"), o daemon promove o status para
-"em progresso" e calcula o `due_date`.
+**Regra 2 -- Auto-atribuição em task pendente:** quando alguém **se atribui** a uma task
+cujo status está em `PENDING_STATUSES` (ex.: "pendente"), o daemon promove o status para
+"em progresso" e calcula o `due_date`. A condição é o ator do evento ser a mesma pessoa
+que passou a ser responsável.
+
+Atribuir **outra** pessoa é tratado como planejamento (v2.0.0): nem status nem prazo
+mudam. Atribuir alguém a uma task de backlog não significa que o trabalho começou -- o
+prazo nasce quando ele começa, pela Regra 1. Para voltar ao comportamento da v1.x, em
+que qualquer adição de responsável dispara a regra, defina
+`PROMOTE_ON_SELF_ASSIGN_ONLY=0`.
+
+Esta regra é **exclusiva do webhook**: o reconciliador não a aplica, porque ela depende
+de quem executou a ação e ele só enxerga o estado atual da task.
 
 **Regra 3 -- Auditoria total:** toda mudança em qualquer task (de qualquer tipo) é
 registrada no banco SQLite local, incluindo as próprias ações do daemon. O registro
@@ -135,30 +145,64 @@ No startup, o log deve mostrar a linha `Token owner resolvido: id=<id>`. Se apar
 
 ## 3.1. Configurar o reconciliador (systemd timer)
 
-O reconciliador varre periodicamente as listas configuradas e aplica as regras de
-`due_date` e promoção de status em tasks que o webhook possa ter perdido (reinício
-do daemon, 502 transitório, evento anterior ao deploy).
+O reconciliador varre periodicamente as listas configuradas e aplica a regra de
+`due_date` em tasks que o webhook possa ter perdido (reinício do daemon, 502
+transitório, evento anterior ao deploy). Ele **não** promove status: desde a v2.0.0
+essa regra depende do ator do evento e é exclusiva do webhook.
 
 ```bash
 sudo cp deploy/reconcile.service /etc/systemd/system/
 sudo cp deploy/reconcile.timer   /etc/systemd/system/
 
-# Definir RECONCILE_LIST_IDS no unit (IDs das listas separados por virgula)
-sudo nano /etc/systemd/system/reconcile.service
+# Definir RECONCILE_LIST_IDS no .env (IDs das listas separados por virgula)
+sudo nano /opt/clickup-deadline-daemon/.env
 
 sudo systemctl daemon-reload
 sudo systemctl enable --now reconcile.timer
 
 # Verificar proxima execucao
 systemctl list-timers reconcile.timer
-
-# Dry-run manual para validar antes de ativar
-RECONCILE_DRY_RUN=1 sudo systemctl start reconcile.service
-sudo journalctl -u clickup-reconciler -f
 ```
+
+`RECONCILE_LIST_IDS` vive no **`.env`**, não na unit. Motivo: por `systemd.exec(5)`,
+"settings from these files override settings made with `Environment=`" -- o
+`EnvironmentFile=` vence sobre qualquer `Environment=` da unit, independente da ordem.
+Definir a variável na unit funcionaria só enquanto ela não existisse no `.env`, o que é
+uma armadilha silenciosa.
+
+### Dry-run
+
+Para simular sem escrever nada, use uma destas duas formas:
+
+```bash
+# A) unidade transitoria: nao altera nenhum arquivo (preferida)
+sudo systemd-run --uid=www-data --wait --collect --pipe \
+  --property=WorkingDirectory=/opt/clickup-deadline-daemon \
+  --property=EnvironmentFile=/opt/clickup-deadline-daemon/.env \
+  --setenv=RECONCILE_DRY_RUN=1 \
+  /opt/clickup-deadline-daemon/venv/bin/python /opt/clickup-deadline-daemon/reconcile.py
+
+# B) pelo .env: valido porque EnvironmentFile vence sobre o Environment= da unit
+#    (lembre-se de REMOVER a linha depois -- enquanto ela existir, o timer roda a vazio)
+echo 'RECONCILE_DRY_RUN=1' | sudo tee -a /opt/clickup-deadline-daemon/.env
+sudo systemctl start reconcile.service
+sudo journalctl -u reconcile.service -n 50 --no-pager
+sudo sed -i '/^RECONCILE_DRY_RUN=1$/d' /opt/clickup-deadline-daemon/.env
+```
+
+A forma A depende de `RECONCILE_DRY_RUN` **não** existir no `.env` -- se existir, o
+`--setenv` é ignorado em silêncio (mesma regra de precedência acima) e a execução é real.
+
+> **Não funciona:** `RECONCILE_DRY_RUN=1 sudo systemctl start reconcile.service`. O
+> `sudo` faz `env_reset` por padrão e o `systemctl start` não repassa o ambiente do
+> chamador ao processo que o systemd cria. O comando roda, mas em modo real.
 
 O timer executa a cada **10 minutos** com `Persistent=true` -- garante execução ao
 reiniciar o VPS caso o horário programado tenha passado durante o downtime.
+
+Para aplicar uma mudança de `RECONCILE_LIST_IDS` imediatamente, use
+`sudo systemctl start reconcile.service`. Reiniciar o **timer** não antecipa nada:
+`OnUnitActiveSec=` conta a partir da última ativação do *serviço*.
 
 **Nota:** o reconciliador não repete a lógica de "atribuir quem moveu o status"
 (Regra 1 parte 2), pois essa depende do ator do evento original, disponível apenas
@@ -300,8 +344,9 @@ Requer `pytest>=8.3` e `pytest-asyncio>=0.24` (instalados via `requirements-dev.
 | `CLICKUP_API_TOKEN` | Sim | -- | Token da **conta de serviço** da API do ClickUp (ver seção 1). |
 | `CLICKUP_WEBHOOK_SECRET` | Não | -- | Secret HMAC para validar assinatura dos webhooks. Gerado pelo ClickUp na criação -- copiar da resposta do `register_webhook.py register`. |
 | `TRIGGER_STATUSES` | Não | `em progresso,in progress` | Status que disparam o cálculo e a atribuição automática, separados por vírgula, case-insensitive. Deve bater com o nome exato do status no Space ClickUp (verificar em Settings -> Statuses). |
-| `TARGET_STATUS` | Não | `em progresso` | Nome exato do status para o qual a Regra 2 promove tasks "pendentes". Deve bater com o status configurado no Space. |
-| `PENDING_STATUSES` | Não | `pendente` | Status considerados "pendente" para a Regra 2, separados por vírgula, case-insensitive. |
+| `TARGET_STATUS` | Não | `em progresso` | Nome exato do status para o qual a Regra 2 promove tasks "pendentes". Deve bater com o status configurado no Space. Lido apenas pelo webhook. |
+| `PENDING_STATUSES` | Não | `pendente` | Status considerados "pendente" para a Regra 2, separados por vírgula, case-insensitive. Lido apenas pelo webhook. |
+| `PROMOTE_ON_SELF_ASSIGN_ONLY` | Não | `1` | Se `1`, a Regra 2 só age em **auto-atribuição** (ator do evento == responsável adicionado); atribuir outra pessoa não muda status nem prazo. `0` restaura a semântica da v1.x. |
 | `MS_PER_DAY` | Não | `14400000` | Milissegundos por dia útil (default: 4h/dia). |
 | `FALLBACK_ESTIMATE_DAYS` | Não | `2` | Dias úteis usados como estimativa padrão quando a task entra no gatilho sem `time_estimate`: grava a `due_date` e comenta pedindo revisão. `0` desativa o fallback. |
 | `AUDIT_BACKEND` | Não | `sqlite` | Backend de auditoria (somente `sqlite` suportado atualmente). |

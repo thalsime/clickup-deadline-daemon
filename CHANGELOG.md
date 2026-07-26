@@ -9,6 +9,57 @@ Versionamento segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
 
 ## [Não lançado]
 
+## [2.0.0] - 2026-07-26
+
+### Alterado
+
+- **BREAKING -- Regra 2 só age em auto-atribuição.** O daemon passa a promover o status
+  e calcular o prazo apenas quando o ator do evento e o responsável adicionado são a
+  **mesma pessoa** (auto-atribuição = "comecei"). Atribuir outra pessoa passa a ser
+  tratado como **planejamento**: nem status nem `due_date` mudam. Motivo: atribuir alguém
+  a uma task de backlog não significa que o trabalho começou, e a promoção automática
+  impedia o estado "tem dono, ainda não começou". O prazo continua nascendo quando o
+  trabalho inicia, pela Regra 1. Nova `daemon_action`: `skipped` com
+  `reason = assigned_by_other`.
+- **BREAKING -- o reconciliador não promove mais status.** A promoção saiu de
+  `reconcile.py`: ela agora depende do ator do evento, informação que o reconciliador não
+  tem (ele enxerga estado, não histórico). Mantê-la reintroduziria o comportamento
+  removido acima, e de forma reincidente -- a cada 10 minutos, desfazendo qualquer
+  ajuste manual de status. Mesmo critério já aplicado à parte 2 da Regra 1 desde a
+  v1.1.0. O reconciliador passa a cuidar exclusivamente de `due_date`.
+- `TARGET_STATUS` e `PENDING_STATUSES` deixam de ser lidos por `reconcile.py`
+  (continuam válidos no webhook).
+
+### Adicionado
+
+- Variável de ambiente `PROMOTE_ON_SELF_ASSIGN_ONLY` (padrão `1`). Definir `0` restaura
+  a semântica da v1.x no webhook: qualquer adição de responsável dispara a Regra 2.
+  Serve como reversão rápida, sem redeploy.
+- Helper `get_assigned_id(event)` em `main.py`: extrai o ID do responsável adicionado
+  (`history_items[0].after.id`), espelhando `get_actor_id`. Devolve `None` quando o
+  payload não traz usuário válido -- e, na dúvida, o daemon não age.
+- Testes da nova semântica e da regressão do reconciliador -- 66 testes no total.
+
+### Corrigido
+
+- **Supertask com todas as subtasks concluídas escapava da detecção no reconciliador.**
+  `get_list_tasks` listava com `include_closed=false`, então nenhuma subtask fechada
+  voltava na resposta para referenciar a mãe em `parent`. A supertask era tratada como
+  task comum e recebia prazo próprio (com fallback e comentário público quando sem
+  `time_estimate`) -- exatamente o que a v1.3.0 quis evitar. A listagem passa a usar
+  `include_closed=true`; tasks concluídas não casam com `TRIGGER_STATUSES` e portanto
+  não geram escrita.
+- **Procedimento de dry-run documentado não funcionava.** O README instruía
+  `RECONCILE_DRY_RUN=1 sudo systemctl start reconcile.service`, que falha por dois
+  motivos independentes: `sudo` faz `env_reset` por padrão, e `systemctl start` não
+  repassa o ambiente do chamador ao processo criado pelo systemd. Quem seguisse o
+  procedimento acreditaria estar simulando e dispararia execução real. Substituído por
+  duas formas que de fato funcionam.
+- README alinhado ao `.env.example` quanto à origem de `RECONCILE_LIST_IDS`: a variável
+  vive no `.env`, não na unit. Como `EnvironmentFile=` tem precedência sobre
+  `Environment=` (`systemd.exec(5)`), definir a variável na unit seria sobrescrito pelo
+  `.env` sempre que ela existisse lá.
+
 ## [1.3.0] - 2026-06-26
 
 ### Adicionado
@@ -145,7 +196,8 @@ Versionamento segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
 - `register_webhook.py`: script auxiliar para registrar o endpoint no workspace.
 - Unidades systemd (`clickup-deadline-daemon.service`) para execução como serviço.
 
-[Não lançado]: https://github.com/thalsime/clickup-deadline-daemon/compare/v1.3.0...HEAD
+[Não lançado]: https://github.com/thalsime/clickup-deadline-daemon/compare/v2.0.0...HEAD
+[2.0.0]: https://github.com/thalsime/clickup-deadline-daemon/compare/v1.3.0...v2.0.0
 [1.3.0]: https://github.com/thalsime/clickup-deadline-daemon/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/thalsime/clickup-deadline-daemon/compare/v1.1.3...v1.2.0
 [1.1.3]: https://github.com/thalsime/clickup-deadline-daemon/compare/v1.1.2...v1.1.3

@@ -1,5 +1,5 @@
 """
-clickup-deadline-daemon  v1.3.0
+clickup-deadline-daemon  v2.0.0
 ===============================
 Webhook receiver que:
   1. Calcula due_date quando uma task muda para "em progresso" ou recebe um assignee.
@@ -65,6 +65,14 @@ PENDING_STATUSES = {
     for s in os.environ.get("PENDING_STATUSES", "pendente").split(",")
     if s.strip()
 }
+
+# Regra 2, semântica da v2.0.0: só agir quando a pessoa se AUTO-ATRIBUI, isto é, quando
+# o ator do evento e o responsável adicionado são o mesmo usuário. Atribuir outra pessoa
+# é planejamento e não deve ser lido como "o trabalho começou".
+# Definir 0 restaura a semântica da v1.x (qualquer adição de responsável dispara a regra).
+PROMOTE_ON_SELF_ASSIGN_ONLY = os.environ.get(
+    "PROMOTE_ON_SELF_ASSIGN_ONLY", "1"
+).strip().lower() in ("1", "true", "yes")
 
 # Fallback de estimativa: quando a task entra no gatilho sem time_estimate, em vez de
 # pular, o daemon usa este número de dias úteis como estimativa padrão, grava a due_date
@@ -271,6 +279,21 @@ def get_actor_id(event: dict) -> int | None:
         return None
 
 
+def get_assigned_id(event: dict) -> int | None:
+    """
+    Extrai o ID do usuário ATRIBUÍDO no evento (history_items[0].after.id).
+
+    Em 'taskAssigneeUpdated' de adição, o campo 'after' traz o usuário que passou a ser
+    responsável. Retorna None quando o payload não traz um usuário válido (remoção,
+    'after' vazio ou ausente) -- ver should_trigger_on_assignee.
+    """
+    try:
+        raw_id = event["history_items"][0]["after"]["id"]
+        return int(raw_id)
+    except (KeyError, IndexError, TypeError, ValueError):
+        return None
+
+
 def is_self_action(event: dict) -> bool:
     """
     Verifica se a ação foi executada pelo próprio daemon (token owner).
@@ -466,12 +489,38 @@ async def handle_assignee_added(
     """
     Handler para taskAssigneeUpdated.
 
-    Regra 2: calcula due_date (se não existir). Se a task estiver em um status
-    "pendente", promove para TARGET_STATUS ("em progresso").
+    Regra 2 (v2.0.0): só age quando a pessoa se AUTO-ATRIBUI -- o ator do evento e o
+    responsável adicionado são o mesmo usuário. Nesse caso calcula due_date (se não
+    existir) e, se a task estiver em um status "pendente", promove para TARGET_STATUS.
+
+    Atribuir OUTRA pessoa é planejamento: nem status nem prazo mudam. O prazo nasce
+    quando o trabalho começa, pela Regra 1 (mudança para um status de trigger, que
+    também atribui quem moveu). Com PROMOTE_ON_SELF_ASSIGN_ONLY=0 volta a semântica
+    da v1.x, em que qualquer adição de responsável dispara a regra.
 
     Cada ação (due_date, set_status) é isolada: falha em uma não aborta as demais.
     A cascata gerada pelo set_status será bloqueada pelo anti-loop (actor = daemon).
     """
+    actor_id    = get_actor_id(event)
+    assigned_id = get_assigned_id(event)
+    self_assign = (
+        actor_id is not None and assigned_id is not None and actor_id == assigned_id
+    )
+
+    # Na dúvida (ator ou atribuído ausentes no payload), não agir: self_assign é False.
+    if PROMOTE_ON_SELF_ASSIGN_ONLY and not self_assign:
+        log.info(
+            "Task %s: responsável %s adicionado por %s (terceiro) -- planejamento, "
+            "nenhuma ação aplicada.",
+            task_id, assigned_id, actor_id,
+        )
+        return {
+            "task_id": task_id,
+            "action":  "skipped",
+            "reason":  "assigned_by_other",
+            "trigger": "assignee_added",
+        }
+
     task = await get_task(client, task_id)
 
     try:
@@ -531,7 +580,7 @@ async def lifespan(app: FastAPI):
 # App
 # ---------------------------------------------------------------------------
 
-app = FastAPI(title="ClickUp Deadline Daemon", version="1.3.0", lifespan=lifespan)
+app = FastAPI(title="ClickUp Deadline Daemon", version="2.0.0", lifespan=lifespan)
 
 # ---------------------------------------------------------------------------
 # Helpers -- assinatura
