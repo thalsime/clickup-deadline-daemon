@@ -23,8 +23,12 @@ WorkingDirectory=/opt/clickup-deadline-daemon
 EnvironmentFile=/opt/clickup-deadline-daemon/.env
 
 # Variaveis especificas do reconciliador.
-# RECONCILE_LIST_IDS: IDs das listas a varrer (csv). Ajustar para o workspace.
-# Para dry-run manual: systemctl start reconcile.service com RECONCILE_DRY_RUN=1.
+# RECONCILE_LIST_IDS: definir no .env, NAO aqui. Por systemd.exec(5), o EnvironmentFile
+# acima sobrepoe qualquer Environment= desta unit, independente da ordem das diretivas.
+#
+# O Environment= abaixo e so o piso seguro: vale enquanto RECONCILE_DRY_RUN nao existir
+# no .env. Para dry-run, ver a secao "Dry-run" do README -- passar a variavel antes de
+# 'systemctl start' NAO funciona (o systemd nao herda o ambiente do chamador).
 Environment=RECONCILE_DRY_RUN=0
 
 ExecStart=/opt/clickup-deadline-daemon/venv/bin/python /opt/clickup-deadline-daemon/reconcile.py
