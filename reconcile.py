@@ -13,7 +13,7 @@ Uso:
   python reconcile.py
 
   # Limitar a listas especificas (IDs separados por virgula):
-  RECONCILE_LIST_IDS=901714316812,901714316813 python reconcile.py
+  RECONCILE_LIST_IDS=<LIST_ID_1>,<LIST_ID_2> python reconcile.py
 
 Variaveis de ambiente (compartilhadas com o daemon via .env):
   CLICKUP_API_TOKEN    -- obrigatoria
