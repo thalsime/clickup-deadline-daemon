@@ -94,9 +94,8 @@ def _write_rows(rows: list[tuple]) -> None:
     """
     if _conn is None:
         raise RuntimeError("init_audit() não foi chamado antes de _write_rows()")
-    with _lock:
-        with _conn:
-            _conn.executemany(_INSERT, rows)
+    with _lock, _conn:
+        _conn.executemany(_INSERT, rows)
 
 
 async def audit_record(
@@ -200,12 +199,11 @@ def _update_action(history_item_ids: list[str], action: str) -> None:
     """Escrita síncrona -- atualiza daemon_action nas linhas já inseridas."""
     if _conn is None:
         return
-    with _lock:
-        with _conn:
-            _conn.executemany(
-                "UPDATE audit_log SET daemon_action = ? WHERE history_item_id = ?",
-                [(action, hid) for hid in history_item_ids],
-            )
+    with _lock, _conn:
+        _conn.executemany(
+            "UPDATE audit_log SET daemon_action = ? WHERE history_item_id = ?",
+            [(action, hid) for hid in history_item_ids],
+        )
 
 
 async def audit_set_daemon_action(history_item_ids: list[str], action: str) -> None:

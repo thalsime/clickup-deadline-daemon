@@ -44,7 +44,7 @@ WEBHOOK_SECRET = os.environ.get("CLICKUP_WEBHOOK_SECRET", "")  # recomendado
 
 # Milissegundos por dia útil (base 4h/dia). Override via env se a base mudar.
 # Ver README.md seção 10 para tabela de referência de valores.
-MS_PER_DAY = int(os.environ.get("MS_PER_DAY", 14_400_000))
+MS_PER_DAY = int(os.environ.get("MS_PER_DAY", "14400000"))
 
 # Status que disparam as regras de due_date e atribuição (lowercase, case-insensitive).
 # IMPORTANTE: os nomes devem bater com os status configurados no Space do ClickUp.
@@ -77,7 +77,7 @@ PROMOTE_ON_SELF_ASSIGN_ONLY = os.environ.get(
 # Fallback de estimativa: quando a task entra no gatilho sem time_estimate, em vez de
 # pular, o daemon usa este número de dias úteis como estimativa padrão, grava a due_date
 # e comenta na task pedindo revisão. 0 desativa o fallback (volta ao skip silencioso).
-FALLBACK_ESTIMATE_DAYS = int(os.environ.get("FALLBACK_ESTIMATE_DAYS", 2))
+FALLBACK_ESTIMATE_DAYS = int(os.environ.get("FALLBACK_ESTIMATE_DAYS", "2"))
 
 # Backend de auditoria e caminho do arquivo SQLite.
 AUDIT_BACKEND = os.environ.get("AUDIT_BACKEND", "sqlite")

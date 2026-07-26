@@ -59,7 +59,7 @@ if not CLICKUP_API_TOKEN:
     print("Erro: variavel de ambiente CLICKUP_API_TOKEN nao definida.", file=sys.stderr)
     sys.exit(1)
 
-MS_PER_DAY = int(os.environ.get("MS_PER_DAY", 14_400_000))
+MS_PER_DAY = int(os.environ.get("MS_PER_DAY", "14400000"))
 
 TRIGGER_STATUSES = {
     s.strip().lower()
@@ -72,7 +72,7 @@ TRIGGER_STATUSES = {
 
 # Fallback de estimativa (mesma semantica do daemon): sem time_estimate, usa este numero
 # de dias uteis como estimativa padrao, grava a due_date e comenta. 0 desativa.
-FALLBACK_ESTIMATE_DAYS = int(os.environ.get("FALLBACK_ESTIMATE_DAYS", 2))
+FALLBACK_ESTIMATE_DAYS = int(os.environ.get("FALLBACK_ESTIMATE_DAYS", "2"))
 
 _list_ids_raw = os.environ.get("RECONCILE_LIST_IDS", "")
 LIST_IDS: list[str] = [lid.strip() for lid in _list_ids_raw.split(",") if lid.strip()]

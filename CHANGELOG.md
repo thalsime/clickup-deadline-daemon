@@ -59,6 +59,28 @@ Versionamento segue [Semantic Versioning](https://semver.org/lang/pt-BR/).
   vive no `.env`, não na unit. Como `EnvironmentFile=` tem precedência sobre
   `Environment=` (`systemd.exec(5)`), definir a variável na unit seria sobrescrito pelo
   `.env` sempre que ela existisse lá.
+- **CI de lint não era determinístico.** O workflow instalava `ruff` sem fixar versão, e o
+  conjunto de regras default muda entre versões: quando a 0.16.0 promoveu `BLE001`,
+  `SIM117` e `PLW1508` ao default, o lint passou a falhar em código que não havia mudado.
+  Qualquer PR aberto a partir dali quebraria, mesmo sem alterar uma linha. Agora há um
+  `ruff.toml` declarando o conjunto adotado (`E4`, `E7`, `E9`, `F`, `SIM`, `PLW`) e a
+  versão está fixada no workflow. `BLE001` fica de fora por decisão de arquitetura (os
+  handlers capturam `Exception` de propósito, para isolar falhas) e `PLW0603` também
+  (estado de inicialização deliberado: singleton da conexão SQLite e `TOKEN_OWNER_ID`).
+- Achados legítimos que as regras novas expuseram: `with` aninhados em `audit.py`
+  (`SIM117`) e defaults de variável de ambiente passados como `int` em vez de `str`
+  (`PLW1508`, em `main.py` e `reconcile.py`).
+
+### Segurança
+
+- `reconcile.py` e `.env.example` traziam IDs de listas reais do workspace nos exemplos
+  de `RECONCILE_LIST_IDS`. Substituídos por placeholders.
+
+### Interno
+
+- O lint do CI passa a cobrir o repositório inteiro (`ruff check .`), e não apenas
+  `main.py`, `audit.py` e `register_webhook.py` -- `reconcile.py` e `rules.py` estavam
+  fora, justamente onde ficava o bug de detecção de supertask corrigido nesta versão.
 
 ## [1.3.0] - 2026-06-26
 
