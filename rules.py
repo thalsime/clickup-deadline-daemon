@@ -50,11 +50,17 @@ async def get_list_tasks(
     """
     Busca tasks de uma lista do ClickUp (paginado).
     Retorna o payload completo: {"tasks": [...], "last_page": bool}.
+
+    include_closed=true e necessario (corrigido na v2.0.0): o chamador identifica as
+    supertasks pelos ids referenciados em algum "parent". Com as tasks fechadas fora da
+    resposta, uma mae cujas subtasks estao TODAS concluidas nao e reconhecida como
+    supertask e recebe prazo proprio -- exatamente o que a v1.3.0 quis evitar.
+    Tasks concluidas nao casam com TRIGGER_STATUSES, entao nao geram escrita.
     """
     resp = await client.get(
         f"{CLICKUP_API_BASE}/list/{list_id}/task",
         params={
-            "include_closed": "false",
+            "include_closed": "true",
             "subtasks":       "true",
             "page":           str(page),
         },

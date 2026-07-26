@@ -26,6 +26,7 @@ os.environ.setdefault("RECONCILE_LIST_IDS", "test-list-id")
 import audit as _audit  # noqa: E402
 import main  # noqa: E402
 import reconcile  # noqa: E402
+import rules  # noqa: E402
 
 # Re-exportar para continuidade dos testes existentes
 from main import (  # noqa: E402
@@ -557,8 +558,11 @@ async def test_regra1_skip_se_com_responsavel(monkeypatch):
 # ===========================================================================
 
 @pytest.mark.asyncio
-async def test_regra2_promove_se_pendente(monkeypatch):
-    """Regra 2: task 'pendente' recebe assignee -> promove para TARGET_STATUS."""
+async def test_regra2_auto_atribuicao_promove_se_pendente(monkeypatch):
+    """
+    Regra 2 (v2.0.0): AUTO-atribuição (ator == atribuído) em task 'pendente'
+    -> promove para TARGET_STATUS.
+    """
     task  = make_task(28_800_000, assignees=[], due_date=None, status="pendente")
     event = make_assignee_event(actor_id=111111, assigned_id=111111)
 
@@ -611,6 +615,91 @@ async def test_regra2_skip_se_nao_pendente(monkeypatch):
 
     assert "status_set" not in result
     assert calls["set_status"] == []
+
+
+# ===========================================================================
+# Regra 2 (v2.0.0): auto-atribuição vs atribuição por terceiro
+# ===========================================================================
+
+def test_get_assigned_id_extrai_do_after():
+    """get_assigned_id lê history_items[0].after.id."""
+    event = make_assignee_event(actor_id=111111, assigned_id=999999)
+    assert main.get_assigned_id(event) == 999999
+
+
+def test_get_assigned_id_none_quando_after_vazio():
+    """Sem usuário em 'after' (remoção/payload incompleto), devolve None."""
+    event = make_assignee_event()
+    event["history_items"][0]["after"] = {}
+    assert main.get_assigned_id(event) is None
+    assert main.get_assigned_id({"history_items": []}) is None
+
+
+@pytest.mark.asyncio
+async def test_regra2_atribuicao_por_terceiro_nao_age(monkeypatch):
+    """
+    Regra 2 (v2.0.0): Alice atribui a Bob -> planejamento. Nem status nem prazo mudam,
+    e a task sequer é buscada (nenhuma chamada de escrita na API).
+    """
+    event = make_assignee_event(actor_id=111111, assigned_id=222222)
+
+    calls: dict = {"get_task": 0, "set_status": [], "set_due_date": []}
+
+    async def mock_get_task(client, task_id):
+        calls["get_task"] += 1
+        return make_task(28_800_000, assignees=[], due_date=None, status="pendente")
+
+    async def mock_set_due_date(client, task_id, due_date_ms):
+        calls["set_due_date"].append(due_date_ms)
+
+    async def mock_set_status(client, task_id, status):
+        calls["set_status"].append(status)
+
+    monkeypatch.setattr(main, "get_task",     mock_get_task)
+    monkeypatch.setattr(main, "set_due_date", mock_set_due_date)
+    monkeypatch.setattr(main, "set_status",   mock_set_status)
+    monkeypatch.setattr(main, "PROMOTE_ON_SELF_ASSIGN_ONLY", True)
+
+    async with httpx.AsyncClient() as client:
+        result = await main.handle_assignee_added(client, "task-001", event)
+
+    assert result["action"] == "skipped"
+    assert result["reason"] == "assigned_by_other"
+    assert calls["get_task"]     == 0, "não deve nem buscar a task"
+    assert calls["set_status"]   == []
+    assert calls["set_due_date"] == []
+
+
+@pytest.mark.asyncio
+async def test_regra2_terceiro_age_com_flag_desligada(monkeypatch):
+    """
+    PROMOTE_ON_SELF_ASSIGN_ONLY=0 restaura a semântica da v1.x: qualquer adição de
+    responsável promove, mesmo feita por terceiro.
+    """
+    task  = make_task(28_800_000, assignees=[], due_date=None, status="pendente")
+    event = make_assignee_event(actor_id=111111, assigned_id=222222)
+
+    calls: dict = {"set_status": []}
+
+    async def mock_get_task(client, task_id):
+        return task
+
+    async def mock_set_due_date(client, task_id, due_date_ms):
+        pass
+
+    async def mock_set_status(client, task_id, status):
+        calls["set_status"].append(status)
+
+    monkeypatch.setattr(main, "get_task",     mock_get_task)
+    monkeypatch.setattr(main, "set_due_date", mock_set_due_date)
+    monkeypatch.setattr(main, "set_status",   mock_set_status)
+    monkeypatch.setattr(main, "PROMOTE_ON_SELF_ASSIGN_ONLY", False)
+
+    async with httpx.AsyncClient() as client:
+        result = await main.handle_assignee_added(client, "task-001", event)
+
+    assert result.get("status_set") == main.TARGET_STATUS
+    assert calls["set_status"] == [main.TARGET_STATUS]
 
 
 # ===========================================================================
@@ -1039,3 +1128,61 @@ async def test_reconcile_task_subtask_recebe_due_date(monkeypatch):
 
     assert len(dues) == 1
     assert "due_date_set" in result["actions"]
+
+
+@pytest.mark.asyncio
+async def test_reconcile_nao_promove_status(monkeypatch):
+    """
+    v2.0.0: o reconciliador NÃO promove status. Task 'pendente' com responsável --
+    que na v1.x seria promovida -- não gera nenhuma ação.
+
+    O reconciliador enxerga estado, não ator: não tem como distinguir auto-atribuição
+    de atribuição por terceiro, e promover aqui reintroduziria o comportamento removido.
+    """
+    task = make_task(
+        28_800_000,
+        assignees=[{"id": 111111, "username": "Alice"}],
+        due_date=None,
+        status="pendente",
+    )
+    monkeypatch.setattr(reconcile, "DRY_RUN", False)
+
+    async with httpx.AsyncClient() as client:
+        result = await reconcile.reconcile_task(client, task, is_supertask=False)
+
+    assert result["actions"] == []
+    assert not hasattr(reconcile, "set_status"), (
+        "set_status não deve voltar ao escopo do reconciliador"
+    )
+
+
+@pytest.mark.asyncio
+async def test_get_list_tasks_inclui_fechadas():
+    """
+    v2.0.0 (Bug A): a listagem do reconciliador precisa de include_closed=true, senão
+    uma supertask cujas subtasks estão TODAS concluídas não é detectada como mãe
+    (nenhuma subtask volta na resposta para referenciá-la em 'parent') e acaba
+    recebendo prazo próprio.
+    """
+    capturado: dict = {}
+
+    class _FakeResp:
+        is_success  = True
+        status_code = 200
+
+        def json(self):
+            return {"tasks": [], "last_page": True}
+
+        def raise_for_status(self):
+            pass
+
+    class _FakeClient:
+        async def get(self, url, params=None):
+            capturado["url"]    = url
+            capturado["params"] = params
+            return _FakeResp()
+
+    await rules.get_list_tasks(_FakeClient(), "list-123", page=0)
+
+    assert capturado["params"]["include_closed"] == "true"
+    assert capturado["params"]["subtasks"]       == "true"

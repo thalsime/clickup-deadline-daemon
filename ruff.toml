@@ -1,0 +1,32 @@
+# Configuracao do ruff.
+#
+# Por que este arquivo existe: sem ele o ruff aplica o conjunto de regras default da
+# VERSAO instalada, e o workflow instalava a versao mais recente disponivel no momento
+# da execucao. Quando o ruff 0.16.0 promoveu novas regras ao default, o CI passou a
+# falhar em codigo que nao havia mudado. Declarar o conjunto explicitamente torna o lint
+# deterministico: o resultado passa a depender do codigo, nao da data do build.
+#
+# Conjunto adotado:
+#   E4/E7/E9  -- erros de pycodestyle (o default historico; E1/E2/E5 ficam de fora para
+#                nao transformar formatacao e comprimento de linha em erro de CI)
+#   F         -- pyflakes (nomes indefinidos, imports nao usados)
+#   SIM       -- flake8-simplify
+#   PLW       -- avisos do pylint (inclui PLW1508, default de env var com tipo errado)
+#
+# BLE (flake8-blind-except) NAO entra por decisao de arquitetura: os handlers do daemon
+# capturam Exception de proposito, para isolar falhas. Uma falha ao gravar due_date nao
+# pode abortar a promocao de status, e o webhook nunca pode derrubar o processo por uma
+# excecao inesperada de um evento isolado. Ver as docstrings de handle_status_in_progress
+# e handle_assignee_added.
+
+line-length = 100
+
+[lint]
+select = ["E4", "E7", "E9", "F", "SIM", "PLW"]
+
+# PLW0603 (uso de `global`) fica de fora: os dois casos do projeto sao estado de
+# inicializacao deliberado, nao acidente. `audit._conn` e o singleton da conexao SQLite,
+# e `main.TOKEN_OWNER_ID` e resolvido uma vez no startup (lifespan) e lido pelo anti-loop
+# em todo evento. Trocar por uma classe de estado ou app.state seria refatoracao
+# estrutural, sem ganho de corretude.
+ignore = ["PLW0603"]
